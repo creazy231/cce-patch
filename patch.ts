@@ -261,11 +261,11 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
     return { patched, count };
   }
 
-  const onMouseRe = /onMouseEnter:[\w$]+\},/;
+  const onMouseRe = /onMouse(?:Enter|Move):[\w$]+\},/;
   const afterBtnClass = patched.substring(btnClassIdx, btnClassIdx + 500);
   const onMouseMatch = afterBtnClass.match(onMouseRe);
   if (!onMouseMatch || onMouseMatch.index === undefined) {
-    console.log("  Could not find onMouseEnter end of button props");
+    console.log("  Could not find onMouse* end of button props");
     return { patched, count };
   }
   const childrenStart = btnClassIdx + onMouseMatch.index + onMouseMatch[0].length;
