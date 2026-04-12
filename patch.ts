@@ -2,7 +2,7 @@
 /**
  * Claude Code Extension Patch
  * Makes the sessions list permanently visible alongside the chat (80/20 split)
- * and adds colored status dots to each session.
+ * adds colored status dots to each session, and defaults reasoning effort to max.
  *
  * Status dots:
  *   🟢 green  = job done, not yet viewed
@@ -467,6 +467,66 @@ function patchIncludeSelectionDefault(code: string): { patched: string; count: n
   return { patched, count };
 }
 
+// ── Webview JS patches: default reasoning effort to max ──
+function patchDefaultEffortMax(code: string): { patched: string; count: number } {
+  let patched = code;
+  let count = 0;
+
+  // Find: effortLevel=OBSERVABLE(void 0)  →  effortLevel=OBSERVABLE("max")
+  // The observable constructor (E0, etc.) is minified, so capture it dynamically.
+  // Context: ...fastModeState=E0("off");effortLevel=E0(void 0);todos=E0([])...
+  const initRe = /effortLevel=([\w$]+)\(void 0\)/;
+  const initMatch = patched.match(initRe);
+
+  if (initMatch) {
+    const obsConstructor = initMatch[1];
+    const original = initMatch[0];
+    const replacement = `effortLevel=${obsConstructor}("max")`;
+    patched = patched.replace(original, replacement);
+    count++;
+    console.log(`  Changed ${original} → ${replacement}`);
+  } else {
+    // Check if already patched
+    if (/effortLevel=[\w$]+\("max"\)/.test(patched)) {
+      console.log('  Already patched: effortLevel default is "max"');
+    } else {
+      console.log("  Could not find effortLevel observable initializer");
+    }
+  }
+
+  return { patched, count };
+}
+
+// ── Extension JS patches: default --effort to max ──
+function patchExtensionEffortMax(code: string): { patched: string; count: number } {
+  let patched = code;
+  let count = 0;
+
+  // Find: if(this.options.effort)ARGS.push("--effort",this.options.effort)
+  // Replace with: ARGS.push("--effort",this.options.effort||"max")
+  // This ensures the CLI always receives --effort max unless explicitly overridden.
+  const effortRe = /if\(this\.options\.effort\)([\w$]+)\.push\("--effort",this\.options\.effort\)/;
+  const effortMatch = patched.match(effortRe);
+
+  if (effortMatch) {
+    const argsVar = effortMatch[1];
+    const original = effortMatch[0];
+    const replacement = `${argsVar}.push("--effort",this.options.effort||"max")`;
+    patched = patched.replace(original, replacement);
+    count++;
+    console.log(`  Changed conditional --effort to default "max" (args var: ${argsVar})`);
+  } else {
+    // Check if already patched
+    if (/\.push\("--effort",this\.options\.effort\|\|"max"\)/.test(patched)) {
+      console.log('  Already patched: --effort defaults to "max"');
+    } else {
+      console.log("  Could not find --effort push pattern in extension.js");
+    }
+  }
+
+  return { patched, count };
+}
+
 // ── Extension JS patches (feature flags) ──
 function patchExtensionJs(code: string): { patched: string; count: number } {
   let patched = code;
@@ -541,15 +601,26 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   // Always read from backups (the true originals)
   let totalPatches = 0;
 
-  // 1. Patch extension.js (feature flags)
-  console.log("\n[extension.js]");
+  // 1. Patch extension.js (feature flags + default effort max)
+  console.log("\n[extension.js — feature flags]");
   const extCode = readFileSync(extJsBak, "utf-8");
-  const extResult = patchExtensionJs(extCode);
-  if (extResult.count > 0) {
-    writeFileSync(extJs, extResult.patched, "utf-8");
-    totalPatches += extResult.count;
+  let extPatched = extCode;
+  let extCount = 0;
+
+  const extFlagResult = patchExtensionJs(extPatched);
+  extPatched = extFlagResult.patched;
+  extCount += extFlagResult.count;
+
+  console.log("\n[extension.js — default effort max]");
+  const extEffortResult = patchExtensionEffortMax(extPatched);
+  extPatched = extEffortResult.patched;
+  extCount += extEffortResult.count;
+
+  if (extCount > 0) {
+    writeFileSync(extJs, extPatched, "utf-8");
+    totalPatches += extCount;
   } else {
-    console.log("  No feature flag patches needed.");
+    console.log("  No extension.js patches needed.");
   }
 
   // 2. Patch webview/index.js (sidebar + status dots)
@@ -566,6 +637,11 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   const selResult = patchIncludeSelectionDefault(wvJsCode);
   wvJsCode = selResult.patched;
   wvJsCount += selResult.count;
+
+  console.log("\n[webview/index.js — default effort max]");
+  const effortResult = patchDefaultEffortMax(wvJsCode);
+  wvJsCode = effortResult.patched;
+  wvJsCount += effortResult.count;
 
   console.log("\n[webview/index.js — status dots]");
   const dotsResult = patchSessionStatusDots(wvJsCode);
