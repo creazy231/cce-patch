@@ -24,6 +24,11 @@ const EDITOR_CONFIGS = [
   { label: "VSCodium",         extDir: join(homedir(), ".vscodium", "extensions") },
 ];
 
+function extractVersion(dirName: string): number[] {
+  const m = dirName.match(/anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)/);
+  return m ? [parseInt(m[1]), parseInt(m[2]), parseInt(m[3])] : [0, 0, 0];
+}
+
 function findAllExtensionDirs(): { label: string; dir: string }[] {
   const results: { label: string; dir: string }[] = [];
   for (const { label, extDir } of EDITOR_CONFIGS) {
@@ -32,7 +37,11 @@ function findAllExtensionDirs(): { label: string; dir: string }[] {
       .filter((e) => e.startsWith("anthropic.claude-code-"))
       .map((e) => join(extDir, e));
     if (entries.length > 0) {
-      entries.sort();
+      entries.sort((a, b) => {
+        const va = extractVersion(a);
+        const vb = extractVersion(b);
+        return va[0] - vb[0] || va[1] - vb[1] || va[2] - vb[2];
+      });
       results.push({ label, dir: entries[entries.length - 1] });
     }
   }
