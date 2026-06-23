@@ -113,30 +113,45 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
     console.log(`  Warning: Could not find ${funcName} function`);
   }
 
-  // Step 4: Remove the overlay div (click-outside backdrop)
-  const overlayMarker = `className:${cssVar}.overlay,onMouseDown:`;
-  const overlayMarkerIdx = patched.indexOf(overlayMarker);
-  if (overlayMarkerIdx !== -1) {
-    let createElemStart = patched.lastIndexOf("createElement", overlayMarkerIdx);
-    const before = patched.substring(Math.max(0, createElemStart - 60), createElemStart);
-    const prefixMatch = before.match(/([\w$]+\.default\.)$/);
-    if (prefixMatch) {
-      createElemStart -= prefixMatch[1].length;
-    }
+  // Step 4: Remove the overlay div (click-outside backdrop).
+  //
+  // Supports BOTH element-creation forms:
+  //   - classic:  X.default.createElement("div",{className:VAR.overlay,onMouseDown:...})
+  //   - JSX runtime (2.1.186+):  b("div",{className:VAR.overlay,onMouseDown:...})
+  //
+  // We anchor on the contiguous, highly-specific `("div",{className:VAR.overlay`
+  // and bracket-match the element from its opening paren. This can NEVER jump to an
+  // unrelated element (the old code's `lastIndexOf("createElement")` matched a far-away
+  // <input> in the JSX-runtime bundle and corrupted the render tree). If the element
+  // can't be found, we skip — the CSS rule already hides `.overlay` with display:none.
+  const overlayOpen = `("div",{className:${cssVar}.overlay`;
+  const overlayOpenIdx = patched.indexOf(overlayOpen);
+  if (overlayOpenIdx !== -1) {
+    // Walk back over the element-creation helper identifier
+    // ("b", or "Cg.default.createElement", etc.) to find the element start.
+    let elemStart = overlayOpenIdx;
+    while (elemStart > 0 && /[\w$.]/.test(patched[elemStart - 1])) elemStart--;
+    // Bracket-match parens from the opening "(" to find the element end.
     let depth = 0;
-    let end = createElemStart;
-    for (let i = createElemStart; i < patched.length && i < createElemStart + 500; i++) {
+    let end = overlayOpenIdx;
+    for (let i = overlayOpenIdx; i < patched.length && i < overlayOpenIdx + 1500; i++) {
       if (patched[i] === "(") depth++;
-      if (patched[i] === ")") {
+      else if (patched[i] === ")") {
         depth--;
         if (depth === 0) { end = i + 1; break; }
       }
     }
-    if (patched[end] === ",") end++;
-    const removed = patched.substring(createElemStart, end);
-    patched = patched.substring(0, createElemStart) + patched.substring(end);
-    count++;
-    console.log(`  Removed overlay backdrop element: ${removed.substring(0, 80)}...`);
+    if (depth === 0 && end > overlayOpenIdx) {
+      if (patched[end] === ",") end++; // consume the comma separating it from the dropdown sibling
+      const removed = patched.substring(elemStart, end);
+      patched = patched.substring(0, elemStart) + patched.substring(end);
+      count++;
+      console.log(`  Removed overlay backdrop element: ${removed.substring(0, 80)}...`);
+    } else {
+      console.log("  Warning: could not bracket-match overlay element; skipped (CSS still hides it)");
+    }
+  } else {
+    console.log("  Could not find overlay element to remove (CSS still hides it)");
   }
 
   // Step 5: Remove the fixed positioning style on dropdown
@@ -147,28 +162,24 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
     console.log(`  Removed inline positioning style`);
   }
 
-  // Step 6: Force isOpen:!0 in the createElement call that renders this component
-  const renderRe = new RegExp(
-    `createElement\\(${funcName},\\{isOpen:[\\w$]+,onClose:`
-  );
-  const renderMatch = patched.match(renderRe);
-  if (renderMatch) {
-    patched = patched.replace(renderMatch[0], `createElement(${funcName},{isOpen:!0,onClose:`);
+  // Escape any regex-special chars in the (minified) function name.
+  const fnEsc = funcName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Step 6: Force isOpen:!0 in the render call that mounts this component.
+  // Anchors on `<funcName>,{isOpen:VAR,onClose:` so it matches both forms:
+  //   classic:      createElement(nQe,{isOpen:VAR,onClose:...)
+  //   JSX runtime:  b(nQe,{isOpen:VAR,onClose:...)
+  const renderRe = new RegExp(`(${fnEsc},\\{isOpen:)[\\w$]+(,onClose:)`);
+  if (renderRe.test(patched)) {
+    patched = patched.replace(renderRe, "$1!0$2");
     count++;
     console.log(`  Forced isOpen:!0 in render call`);
   }
 
-  // Step 7: Make onClose a no-op to prevent closing
-  const noopCloseRe = new RegExp(
-    `createElement\\(${funcName},\\{isOpen:!0,onClose:` +
-    `\\(\\)=>[^,]+,`
-  );
-  const noopCloseMatch = patched.match(noopCloseRe);
-  if (noopCloseMatch) {
-    patched = patched.replace(
-      noopCloseMatch[0],
-      `createElement(${funcName},{isOpen:!0,onClose:()=>{},`
-    );
+  // Step 7: Make onClose a no-op to prevent closing (form-agnostic).
+  const noopCloseRe = new RegExp(`(${fnEsc},\\{isOpen:!0,onClose:)\\(\\)=>[^,]+,`);
+  if (noopCloseRe.test(patched)) {
+    patched = patched.replace(noopCloseRe, "$1()=>{},");
     count++;
     console.log(`  Made onClose a no-op`);
   }
@@ -192,8 +203,11 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   const cssVar = cssMatch[1];
   console.log(`  Session CSS module: ${cssVar}`);
 
-  // Step 2: Find the forwardRef session item render function
-  // Unique: the only forwardRef function with {session:VAR,isActive:VAR,...}
+  // Step 2: Find the session item render function.
+  // Unique: the only component function with {session:VAR,isActive:VAR,...} params.
+  // Match the bare `function({session:...,isActive:...},` so it works whether the
+  // function is wrapped in `forwardRef(...)` (classic) or a minified alias like
+  // `Jt(...)` (2.1.186+) — the wrapper literal is not required.
   const itemUseIdx = patched.indexOf(`${cssVar}.sessionItem`);
   if (itemUseIdx === -1) {
     console.log(`  Could not find ${cssVar}.sessionItem usage`);
@@ -201,10 +215,10 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   }
 
   const searchBack = patched.substring(Math.max(0, itemUseIdx - 6000), itemUseIdx);
-  const funcRe = /forwardRef\(function\(\{session:([\w$]+),isActive:([\w$]+),/g;
+  const funcRe = /function\(\{session:([\w$]+),isActive:([\w$]+),/g;
   const funcMatches = [...searchBack.matchAll(funcRe)];
   if (funcMatches.length === 0) {
-    console.log("  Could not find session item forwardRef function");
+    console.log("  Could not find session item render function");
     return { patched, count };
   }
   const fm = funcMatches[funcMatches.length - 1];
@@ -212,20 +226,10 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   const isActiveVar = fm[2];
   console.log(`  Session item vars: session=${sessionVar}, isActive=${isActiveVar}`);
 
-  // Step 3: Find the React module variable
-  const nearButton = patched.substring(Math.max(0, itemUseIdx - 200), itemUseIdx);
-  const reactMatch = nearButton.match(/([\w$]+)\.default\.createElement\("button"/);
-  if (!reactMatch) {
-    console.log("  Could not find React module variable");
-    return { patched, count };
-  }
-  const reactVar = reactMatch[1];
-  console.log(`  React module: ${reactVar}`);
-
-  // Step 4: Inject status computation at the beginning of the function body
-  // Find: forwardRef(function({session:S,isActive:A,...},REF){FIRSTCALL();
+  // Step 3: Inject status computation at the beginning of the function body
+  // Find: function({session:S,isActive:A,...},REF){FIRSTCALL();
   // Inject after FIRSTCALL();
-  const funcSigAnchor = `forwardRef(function({session:${sessionVar},isActive:${isActiveVar},`;
+  const funcSigAnchor = `function({session:${sessionVar},isActive:${isActiveVar},`;
   const funcSigIdx = patched.indexOf(funcSigAnchor);
   if (funcSigIdx === -1) {
     console.log("  Could not find function signature anchor");
@@ -261,8 +265,12 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   count++;
   console.log(`  Injected status tracking code`);
 
-  // Step 5: Inject the dot element as first child of the session item button
-  // Find: onMouseEnter:VAR}, which ends the button props, right before the children
+  // Step 4: Inject the dot element as the first child of the session item button.
+  // Two render forms are supported:
+  //   JSX runtime (2.1.186+):  E("button",{...,onMouseMove:a,children:[ <children> ]})
+  //                            → insert the dot as first element inside `children:[`
+  //   classic:                 X.default.createElement("button",{...,onMouseMove:a}, <children>)
+  //                            → insert the dot right after the props object `},`
   const btnClassAnchor = `className:\`\${${cssVar}.sessionItem}`;
   const btnClassIdx = patched.indexOf(btnClassAnchor, funcSigIdx);
   if (btnClassIdx === -1) {
@@ -270,22 +278,49 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
     return { patched, count };
   }
 
-  const onMouseRe = /onMouse(?:Enter|Move):[\w$]+\},/;
-  const afterBtnClass = patched.substring(btnClassIdx, btnClassIdx + 500);
-  const onMouseMatch = afterBtnClass.match(onMouseRe);
-  if (!onMouseMatch || onMouseMatch.index === undefined) {
-    console.log("  Could not find onMouse* end of button props");
-    return { patched, count };
+  const afterBtnClass = patched.substring(btnClassIdx, btnClassIdx + 600);
+  const childrenRel = afterBtnClass.indexOf(",children:[");
+  const onMouseMatch = afterBtnClass.match(/onMouse(?:Enter|Move):[\w$]+\},/);
+
+  if (childrenRel !== -1 && (!onMouseMatch || childrenRel < (onMouseMatch.index ?? Infinity))) {
+    // JSX runtime form — insert as first element of the children array.
+    const childrenStart = btnClassIdx + childrenRel + ",children:[".length;
+    // Capture the single-element jsx helper (e.g. "b") from the next element.
+    const helperMatch = patched
+      .substring(childrenStart, childrenStart + 120)
+      .match(/([\w$]+)\("(?:span|div)"/);
+    if (!helperMatch) {
+      console.log("  Could not determine jsx helper for status dot");
+      return { patched, count };
+    }
+    const jsxHelper = helperMatch[1];
+    const dotElement =
+      `${jsxHelper}("span",{className:"cce-status-dot","data-status":__cceSt}),`;
+    patched = patched.substring(0, childrenStart) + dotElement + patched.substring(childrenStart);
+    count++;
+    console.log(`  Injected status dot element (jsx form, helper: ${jsxHelper})`);
+  } else if (onMouseMatch && onMouseMatch.index !== undefined) {
+    // Classic createElement form — insert right after the props object.
+    // Anchor on btnClassIdx (recomputed after the status-code injection) — the
+    // button's `X.default.createElement("button",{ref:f,` sits just before it.
+    const reactMatch = patched
+      .substring(Math.max(0, btnClassIdx - 200), btnClassIdx)
+      .match(/([\w$]+)\.default\.createElement\("button"/);
+    if (!reactMatch) {
+      console.log("  Could not find React module variable");
+      return { patched, count };
+    }
+    const reactVar = reactMatch[1];
+    const childrenStart = btnClassIdx + onMouseMatch.index + onMouseMatch[0].length;
+    const dotElement =
+      `${reactVar}.default.createElement("span",` +
+      `{className:"cce-status-dot","data-status":__cceSt}),`;
+    patched = patched.substring(0, childrenStart) + dotElement + patched.substring(childrenStart);
+    count++;
+    console.log(`  Injected status dot element (createElement form, React: ${reactVar})`);
+  } else {
+    console.log("  Could not find children insertion point for status dot");
   }
-  const childrenStart = btnClassIdx + onMouseMatch.index + onMouseMatch[0].length;
-
-  const dotElement =
-    `${reactVar}.default.createElement("span",` +
-    `{className:"cce-status-dot","data-status":__cceSt}),`;
-
-  patched = patched.substring(0, childrenStart) + dotElement + patched.substring(childrenStart);
-  count++;
-  console.log(`  Injected status dot element`);
 
   return { patched, count };
 }
@@ -439,28 +474,30 @@ function patchIncludeSelectionDefault(code: string): { patched: string; count: n
   const setterVar = ownerMatch[2];
   console.log(`  Found includeSelection state owner: [${stateVar},${setterVar}]`);
 
-  // Find the useState call matching BOTH the state var and setter: [VAR,SETTER]=REACT.useState(!0)
+  // Find the state initializer matching BOTH the state var and setter.
+  // Supports the classic `[VAR,SETTER]=REACT.useState(!0)` form AND the newer
+  // bundles' bare minified hook alias `[VAR,SETTER]=oe(!0)` (2.1.186+).
   const esc = (v: string) => v.replace(/[$]/g, "\\$");
   const stateRe = new RegExp(
-    `\\[${esc(stateVar)},${esc(setterVar)}\\]=[\\w$]+\\.useState\\(!0\\)`
+    `\\[${esc(stateVar)},${esc(setterVar)}\\]=[\\w$.]+\\(!0\\)`
   );
   const stateMatch = patched.match(stateRe);
 
   if (stateMatch) {
     const original = stateMatch[0];
-    const flipped = original.replace(".useState(!0)", ".useState(!1)");
+    const flipped = original.replace(/\(!0\)$/, "(!1)");
     patched = patched.replace(original, flipped);
     count++;
     console.log(`  Changed ${original} → ${flipped}`);
   } else {
     // Check if already patched
     const alreadyRe = new RegExp(
-      `\\[${esc(stateVar)},${esc(setterVar)}\\]=[\\w$]+\\.useState\\(!1\\)`
+      `\\[${esc(stateVar)},${esc(setterVar)}\\]=[\\w$.]+\\(!1\\)`
     );
     if (alreadyRe.test(patched)) {
       console.log("  Already patched: includeSelection default is !1");
     } else {
-      console.log("  Could not find useState initializer for [${stateVar},${setterVar}]");
+      console.log(`  Could not find state initializer for [${stateVar},${setterVar}]`);
     }
   }
 
