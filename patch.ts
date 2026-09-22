@@ -54,13 +54,29 @@ function findAllExtensionDirs(): { label: string; dir: string }[] {
   return results;
 }
 
+// Minified identifiers may contain `$` and `_` (esbuild emits names like `$ot`).
+// `\w` does NOT match `$`, so every identifier capture must use [\w$].
+const ID = "[\\w$]+";
+
+// Escape a captured minified identifier for safe use inside a RegExp
+// (a bare `$` would otherwise act as an end-of-input anchor).
+function escRe(v: string): string {
+  return v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Escape a captured identifier for use in a String.replace() replacement
+// (`$` is special there too: `$&`, `$1`, `$$`, …).
+function escRepl(v: string): string {
+  return v.replace(/\$/g, "$$$$");
+}
+
 // ── Webview JS patches: sessions sidebar always open ──
 function patchWebviewJs(code: string): { patched: string; count: number } {
   let patched = code;
   let count = 0;
 
   // Step 1: Find the CSS module var: VAR={overlay:"overlay_XXXXX",dropdown:"dropdown_XXXXX"}
-  const cssModuleRe = /(\w+)=\{overlay:"(overlay_\w+)",dropdown:"(dropdown_\w+)"\}/;
+  const cssModuleRe = /([\w$]+)=\{overlay:"(overlay_\w+)",dropdown:"(dropdown_\w+)"\}/;
   const cssModuleMatch = patched.match(cssModuleRe);
 
   if (!cssModuleMatch) {
@@ -80,8 +96,11 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
     return { patched, count };
   }
 
+  // NOTE: the component name is minified and may start with `$` (e.g. `$ot` in
+  // 2.1.229+, `sot` in 2.1.227). Must be [\w$]+ — `\w+` silently fails on `$ot`,
+  // which skips steps 3-7 and leaves the sidebar styled but never rendered.
   const searchBack = patched.substring(Math.max(0, cssUseIdx - 3000), cssUseIdx);
-  const allFuncMatches = [...searchBack.matchAll(/function\s+(\w+)\(\{isOpen:([\w$]+),/g)];
+  const allFuncMatches = [...searchBack.matchAll(/function\s+([\w$]+)\(\{isOpen:([\w$]+),/g)];
   if (allFuncMatches.length === 0) {
     console.log("  Could not find sessions dropdown function");
     return { patched, count };
@@ -155,15 +174,15 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
   }
 
   // Step 5: Remove the fixed positioning style on dropdown
-  const styleRe = new RegExp(`className:${cssVar}\\.dropdown,style:\\w+,`);
+  const styleRe = new RegExp(`className:${escRe(cssVar)}\\.dropdown,style:${ID},`);
   if (styleRe.test(patched)) {
-    patched = patched.replace(styleRe, `className:${cssVar}.dropdown,`);
+    patched = patched.replace(styleRe, `className:${escRepl(cssVar)}.dropdown,`);
     count++;
     console.log(`  Removed inline positioning style`);
   }
 
   // Escape any regex-special chars in the (minified) function name.
-  const fnEsc = funcName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const fnEsc = escRe(funcName);
 
   // Step 6: Force isOpen:!0 in the render call that mounts this component.
   // Anchors on `<funcName>,{isOpen:VAR,onClose:` so it matches both forms:
@@ -174,6 +193,10 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
     patched = patched.replace(renderRe, "$1!0$2");
     count++;
     console.log(`  Forced isOpen:!0 in render call`);
+  } else if (new RegExp(`${fnEsc},\\{isOpen:!0,onClose:`).test(patched)) {
+    console.log(`  Already forced isOpen:!0 in render call`);
+  } else {
+    console.log(`  WARNING: could not force isOpen:!0 — sidebar will NOT appear`);
   }
 
   // Step 7: Make onClose a no-op to prevent closing (form-agnostic).
@@ -194,7 +217,7 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
 
   // Step 1: Find the session item CSS module variable
   // Pattern: VAR={...sessionItem:"sessionItem_XXXXX"...}
-  const cssRe = /(\w+)=\{[^}]*sessionItem:"(sessionItem_\w+)"/;
+  const cssRe = /([\w$]+)=\{[^}]*sessionItem:"(sessionItem_\w+)"/;
   const cssMatch = patched.match(cssRe);
   if (!cssMatch) {
     console.log("  Could not find session item CSS module");
@@ -204,18 +227,20 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   console.log(`  Session CSS module: ${cssVar}`);
 
   // Step 2: Find the session item render function.
-  // Unique: the only component function with {session:VAR,isActive:VAR,...} params.
-  // Match the bare `function({session:...,isActive:...},` so it works whether the
-  // function is wrapped in `forwardRef(...)` (classic) or a minified alias like
-  // `Jt(...)` (2.1.186+) — the wrapper literal is not required.
+  // Unique: the only component function destructuring both `session` and `isActive`.
+  // Match the bare `function({session:...` so it works whether the function is
+  // wrapped in `forwardRef(...)` (classic) or a minified alias like `Jt(...)`
+  // (2.1.186+). Other props may sit between the two (2.1.280 inserted `id:Z`), so
+  // allow anything up to `isActive` that stays inside the parameter list (no `)`).
   const itemUseIdx = patched.indexOf(`${cssVar}.sessionItem`);
   if (itemUseIdx === -1) {
     console.log(`  Could not find ${cssVar}.sessionItem usage`);
     return { patched, count };
   }
 
-  const searchBack = patched.substring(Math.max(0, itemUseIdx - 6000), itemUseIdx);
-  const funcRe = /function\(\{session:([\w$]+),isActive:([\w$]+),/g;
+  const searchStart = Math.max(0, itemUseIdx - 6000);
+  const searchBack = patched.substring(searchStart, itemUseIdx);
+  const funcRe = /function\(\{session:([\w$]+),[^)]*?\bisActive:([\w$]+)[,}]/g;
   const funcMatches = [...searchBack.matchAll(funcRe)];
   if (funcMatches.length === 0) {
     console.log("  Could not find session item render function");
@@ -224,42 +249,77 @@ function patchSessionStatusDots(code: string): { patched: string; count: number 
   const fm = funcMatches[funcMatches.length - 1];
   const sessionVar = fm[1];
   const isActiveVar = fm[2];
+  // Use the match position itself: the minified names (`J`, `X`) are reused by
+  // other `function({session:J,...` components elsewhere in the bundle.
+  const funcSigIdx = searchStart + fm.index!;
   console.log(`  Session item vars: session=${sessionVar}, isActive=${isActiveVar}`);
 
-  // Step 3: Inject status computation at the beginning of the function body
-  // Find: function({session:S,isActive:A,...},REF){FIRSTCALL();
-  // Inject after FIRSTCALL();
-  const funcSigAnchor = `function({session:${sessionVar},isActive:${isActiveVar},`;
-  const funcSigIdx = patched.indexOf(funcSigAnchor);
-  if (funcSigIdx === -1) {
-    console.log("  Could not find function signature anchor");
-    return { patched, count };
+  // Step 3: Inject status computation at the beginning of the function body,
+  // right after the signals hook call (`W5();`) so the signal reads below are
+  // tracked and the row re-renders whenever a session's state changes.
+  // Bracket-match the parameter list rather than searching a fixed window: the
+  // signature keeps growing (~400 chars in 2.1.280).
+  const paramsOpen = funcSigIdx + "function".length;
+  let depth = 0;
+  let bodyStart = -1;
+  for (let i = paramsOpen; i < patched.length && i < paramsOpen + 5000; i++) {
+    if (patched[i] === "(") depth++;
+    else if (patched[i] === ")" && --depth === 0) {
+      if (patched[i + 1] === "{") bodyStart = i + 2;
+      break;
+    }
   }
-
-  // Match ){WORD(); — the function body opening and first statement
-  const bodyOpenRe = /\)\{([\w$]+)\(\);/;
-  const afterSig = patched.substring(funcSigIdx, funcSigIdx + 500);
-  const bodyOpenMatch = afterSig.match(bodyOpenRe);
-  if (!bodyOpenMatch || bodyOpenMatch.index === undefined) {
+  const hookMatch = bodyStart === -1 ? null : patched.substring(bodyStart, bodyStart + 40).match(/^[\w$]+\(\);/);
+  if (!hookMatch) {
     console.log("  Could not find function body opening");
     return { patched, count };
   }
-  const insertIdx = funcSigIdx + bodyOpenMatch.index + bodyOpenMatch[0].length;
+  const insertIdx = bodyStart + hookMatch[0].length;
 
-  // Status tracking logic:
-  //   - When busy: status = "running", clear from seen set (so it's green when done)
-  //   - When pendingInput: status = "waiting"
-  //   - When idle + active: add to seen set → "seen" (gray)
-  //   - When idle + not active: check seen set → "seen" (gray) or "done" (green)
-  const statusCode = [
-    `var __cceSt=(window.__cceSeen=window.__cceSeen||new Set(),`,
-    `${sessionVar}.busy.value?"running":`,
-    `${sessionVar}.pendingInput.value?"waiting":`,
-    `(${isActiveVar}?window.__cceSeen.add(${sessionVar}.sessionId.value):void 0,`,
-    `window.__cceSeen.has(${sessionVar}.sessionId.value)?"seen":"done"));`,
-    `if(${sessionVar}.busy.value||${sessionVar}.pendingInput.value)`,
-    `window.__cceSeen.delete(${sessionVar}.sessionId.value);`,
+  // Status per session row. Mirrors how the extension itself reports a session's
+  // state to the host (pending permissionRequests → "waiting_input", busy or
+  // background tasks → "running"), and merges the host's cross-panel feed on
+  // `session.context.comms` so sessions open in other tabs, other windows or a
+  // terminal are coloured too:
+  //   sessionStates          state each chat panel reports for its session
+  //   liveElsewhereSessions  sessions held by other processes, with activity
+  //   unreadSessionKeys      persisted "finished while not viewed" marks
+  // Remote (web) sessions use remoteStatus. `pendingInput` is only ever set from
+  // host state (Session Manager view), never in a chat panel — so it can't be the
+  // sole waiting signal, and waiting must win over busy (a prompt keeps busy on).
+  //
+  //   waiting → orange   running → blue
+  //   done    → green: host unread mark, or this panel saw it working and it
+  //             finished while another session was being viewed
+  //   seen    → gray: everything else, including the session being viewed
+  //
+  // Only work observed in *this* webview is tracked locally: other tabs, and the
+  // Session Manager (whose busy flags are host-fed), defer to the host's mark.
+  // Every read is guarded — a throw here would take down the whole sessions list.
+  const statusFn = [
+    `function(s,active){try{`,
+    `var arr=(v)=>Array.isArray(v)?v:[],c=s.context?.comms,id=s.sessionId?.value,`,
+    `remote=s.isRemote?.value===!0,key=id&&(remote?"remote:"+id:id),`,
+    `from=s.teleportedFromSessionId?.value,keys=arr(c?.unreadSessionKeys?.value),`,
+    `host=id?arr(c?.sessionStates?.value).find((x)=>x?.sessionId===id)?.state:void 0,`,
+    `away=id&&!remote?arr(c?.liveElsewhereSessions?.value).find((x)=>x?.sessionId===id)?.activity:void 0,`,
+    `rs=remote?s.remoteStatus?.value:void 0,`,
+    `perms=(s.permissionRequests?.value?.length??0)>0,busy=s.busy?.value===!0,`,
+    `bg=(s.backgroundTaskIds?.value?.size??0)>0,`,
+    `waiting=perms||s.pendingInput?.value===!0||host==="waiting_input"||away==="waiting"||rs==="requires_action",`,
+    `running=busy||bg||host==="running"||away==="running"||rs==="running",`,
+    `unread=!!key&&keys.includes(key)||!!from&&keys.includes("remote:"+from),`,
+    `W=window.__cceWorked??=new Set,U=window.__cceUnseen??=new Set,t=id||s;`,
+    `if(waiting||running){if((busy||bg||perms)&&!window.IS_SESSION_LIST_ONLY)W.add(t);`,
+    `U.delete(t);return waiting?"waiting":"running"}`,
+    `if(active){W.delete(t);U.delete(t);return"seen"}`,
+    `if(W.delete(t))U.add(t);`,
+    `return unread||U.has(t)?"done":"seen"`,
+    `}catch{return"seen"}}`,
   ].join("");
+  const statusCode =
+    `/*cce-status:begin*/window.__cceStatus=window.__cceStatus||${statusFn};/*cce-status:end*/` +
+    `var __cceSt=window.__cceStatus(${sessionVar},${isActiveVar});`;
 
   patched = patched.substring(0, insertIdx) + statusCode + patched.substring(insertIdx);
   count++;
@@ -330,7 +390,7 @@ function patchWebviewCss(css: string, jsCode: string): { patched: string; count:
   let patched = css;
   let count = 0;
 
-  const cssModuleRe = /(\w+)=\{overlay:"(overlay_\w+)",dropdown:"(dropdown_\w+)"\}/;
+  const cssModuleRe = /([\w$]+)=\{overlay:"(overlay_\w+)",dropdown:"(dropdown_\w+)"\}/;
   const cssModuleMatch = jsCode.match(cssModuleRe);
 
   if (!cssModuleMatch) {
@@ -384,7 +444,7 @@ function patchWebviewCss(css: string, jsCode: string): { patched: string; count:
   }
 
   // Find the main app layout classes from JS
-  const appCssRe = /(\w+)=\{root:"(root_\w+)",editorMode:"(editorMode_\w+)",body:"(body_\w+)",content:"(content_\w+)",sessionBody:"(sessionBody_\w+)"/;
+  const appCssRe = /([\w$]+)=\{root:"(root_\w+)",editorMode:"(editorMode_\w+)",body:"(body_\w+)",content:"(content_\w+)",sessionBody:"(sessionBody_\w+)"/;
   const appCssMatch = jsCode.match(appCssRe);
 
   if (appCssMatch) {
@@ -443,6 +503,9 @@ function patchStatusDotsCss(css: string): { patched: string; count: number } {
     '.cce-status-dot[data-status="running"]{background:#3B82F6;animation:cce-pulse 2s ease-in-out infinite}',
     '.cce-status-dot[data-status="waiting"]{background:#F97316;animation:cce-pulse 1.5s ease-in-out infinite}',
     '.cce-status-dot[data-status="seen"]{background:#6B7280}',
+    // 2.1.280+ renders its own dot in Session Manager rows; ours is always the
+    // first child, so hide the upstream one after it — one dot, one legend.
+    ".cce-status-dot~[data-status-dot]{display:none}",
     "@keyframes cce-pulse{0%,100%{opacity:1}50%{opacity:.4}}",
   ].join("\n");
 
@@ -466,8 +529,8 @@ function patchIncludeSelectionDefault(code: string): { patched: string; count: n
   const ownerMatch = patched.match(ownerRe);
 
   if (!ownerMatch) {
-    console.log("  Could not find includeSelection state owner pattern");
-    return { patched, count };
+    // 2.1.280+ removed the toggle entirely.
+    return patchSelectionOptIn(patched);
   }
 
   const stateVar = ownerMatch[1];
@@ -502,6 +565,87 @@ function patchIncludeSelectionDefault(code: string): { patched: string; count: n
   }
 
   return { patched, count };
+}
+
+// ── Webview JS patches: current file/selection is opt-in per session (2.1.280+) ──
+// 2.1.280 dropped the include-selection toggle. The session's `selection` signal
+// now follows the editor and send() attaches it to every prompt — the open file as
+// <ide_opened_file>, highlighted lines as <ide_selection> — until the chip's ×
+// dismisses it, and any new selection or file switch brings it straight back.
+// Rebuild the old per-session opt-in on top of that model:
+//   • session.cceSelOn signal, off for every new session
+//   • send() only attaches the selection while it's on
+//   • the chip's × turns it off again, instead of hiding the chip
+//   • while off, the footer shows the chip dimmed (the old inactive look);
+//     clicking it attaches
+function patchSelectionOptIn(code: string): { patched: string; count: number } {
+  // Locate every anchor before changing anything: gating send() without the chip
+  // change would leave no way to attach a selection at all.
+  const fieldRe = /selection=([\w$]+)\(void 0\);dismissedSelection;/;
+  const sendRe = /if\(([\w$]+)&&!([\w$]+)\(this\.lastSentSelection,this\.selection\.value\)\)/;
+  const dismissRe = /dismissSelection\(\)\{([^}]*)\}/;
+  // function CHIP({currentSelection:S,onRemove:R}){let L=LABEL(S);return JSXS("span",{className:CSS.selectionChip,…
+  const chipRe = /function ([\w$]+)\(\{currentSelection:([\w$]+),onRemove:[\w$]+\}\)\{let [\w$]+=([\w$]+)\(\2\);return ([\w$]+)\("span",\{className:([\w$]+)\.selectionChip/;
+  const field = code.match(fieldRe);
+  const send = code.match(sendRe);
+  const dismiss = code.match(dismissRe);
+  const chip = code.match(chipRe);
+  // The chip is rendered once, by the input footer: `SEL&&JSX(CHIP,{currentSelection:SEL,onRemove:FN})`.
+  const render = chip && code.match(
+    new RegExp(`([\\w$]+)&&([\\w$]+)\\(${escRe(chip[1])},\\{currentSelection:\\1,onRemove:([\\w$]+)\\}\\)`)
+  );
+  // The footer's own `session` prop, from the nearest enclosing component signature.
+  const footerSession = render && render.index !== undefined
+    ? [...code.substring(Math.max(0, render.index - 8000), render.index).matchAll(/function [\w$]+\(\{session:([\w$]+),/g)].pop()?.[1]
+    : undefined;
+
+  const missing = [
+    !field && "session selection field",
+    !send && "send() selection gate",
+    !dismiss && "dismissSelection()",
+    !chip && "selection chip",
+    chip && !render && "selection chip render",
+    render && !footerSession && "footer session prop",
+  ].filter(Boolean);
+  if (missing.length > 0 || !field || !send || !dismiss || !chip || !render || !footerSession) {
+    console.log(`  Could not find includeSelection toggle or selection chip (missing: ${missing.join(", ")})`);
+    return { patched: code, count: 0 };
+  }
+
+  const [, chipFn, , labelFn, jsxs, chipCss] = chip;
+  const [renderSrc, selVar, jsx, onRemove] = render;
+  const s = footerSession;
+  // The chip's file icon, so the off state looks like the chip (optional).
+  const icon = code.substring(chip.index!, chip.index! + 800)
+    .match(/children:\[[\w$]+\(([\w$]+),\{\}\),[\w$]+\("span",\{children:/)?.[1];
+
+  let patched = code;
+  patched = patched.replace(fieldRe, (_m, sig) => `selection=${sig}(void 0);cceSelOn=${sig}(!1);dismissedSelection;`);
+  patched = patched.replace(sendRe, (_m, include, same) =>
+    `if(${include}&&this.cceSelOn?.value===!0&&!${same}(this.lastSentSelection,this.selection.value))`);
+  patched = patched.replace(dismissRe, (_m, body) =>
+    `dismissSelection(){if(this.cceSelOn)this.cceSelOn.value=!1;else{${body}}}`);
+
+  const label = `${labelFn}(${selVar})`;
+  const offChip =
+    `${jsxs}("button",{type:"button",className:${chipCss}.footerButton+" cce-sel-off",` +
+    `title:"Not showing Claude your current file selection ("+${label}+"). Click to attach.",` +
+    `onClick:()=>{if(${s}.cceSelOn)${s}.cceSelOn.value=!0},` +
+    `children:[${icon ? `${jsx}(${icon},{}),` : ""}${jsx}("span",{children:${label}})]})`;
+  const onChip = `${jsx}(${chipFn},{currentSelection:${selVar},onRemove:${onRemove}})`;
+  // Only a flag that is exactly on shows the attached chip — matches the send() gate.
+  patched = patched.replace(renderSrc, () => `${selVar}&&(${s}.cceSelOn?.value===!0?${onChip}:${offChip})`);
+
+  console.log(`  2.1.280+ selection chip (${chipFn}): current file/selection now opt-in per session, off by default`);
+  return { patched, count: 4 };
+}
+
+// ── Webview CSS patches: dimmed selection chip while not attached ──
+function patchSelectionCss(css: string): { patched: string; count: number } {
+  // Same look as the pre-2.1.280 inactive include-selection button.
+  const rules = "\n/* cce-patch: selection chip, not attached */\n.cce-sel-off{opacity:.5}\n.cce-sel-off:hover{opacity:1}";
+  console.log("  Added dimmed selection chip CSS");
+  return { patched: css + rules, count: 1 };
 }
 
 // ── Webview JS patches: default reasoning effort to max ──
@@ -685,6 +829,30 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   wvJsCode = dotsResult.patched;
   wvJsCount += dotsResult.count;
 
+  // Verify the sidebar actually got wired up. The CSS patches apply independently,
+  // so without this check a failed JS anchor looks like a partial success: the panel
+  // is styled as a sidebar but never rendered. Fail loudly instead.
+  console.log("\n[webview/index.js — verify]");
+  const checks: [string, boolean][] = [
+    ["sessions-always-open guard removed", wvJsCode.includes("/*patched:sessions-always-open*/")],
+    ["isOpen forced true", /[\w$]+,\{isOpen:!0,onClose:/.test(wvJsCode)],
+    ["status dot injected", wvJsCode.includes("cce-status-dot")],
+    ["current file/selection not attached by default", selResult.count > 0],
+  ];
+  let failed = 0;
+  for (const [name, pass] of checks) {
+    console.log(`  ${pass ? "ok  " : "FAIL"} ${name}`);
+    if (!pass) failed++;
+  }
+  if (failed > 0) {
+    console.log(
+      `\n  !! ${failed} check(s) failed — the extension bundle likely changed shape.\n` +
+      `     Each FAIL above needs its patch function's anchors updated for this version\n` +
+      `     (sidebar: patchWebviewJs, dots: patchSessionStatusDots,\n` +
+      `      selection: patchIncludeSelectionDefault / patchSelectionOptIn).`
+    );
+  }
+
   if (wvJsCount > 0) {
     writeFileSync(webviewJs, wvJsCode, "utf-8");
     totalPatches += wvJsCount;
@@ -706,6 +874,11 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   const dotsCssResult = patchStatusDotsCss(wvCssCode);
   wvCssCode = dotsCssResult.patched;
   wvCssCount += dotsCssResult.count;
+
+  console.log("\n[webview/index.css — selection chip]");
+  const selCssResult = patchSelectionCss(wvCssCode);
+  wvCssCode = selCssResult.patched;
+  wvCssCount += selCssResult.count;
 
   if (wvCssCount > 0) {
     writeFileSync(webviewCss, wvCssCode, "utf-8");
