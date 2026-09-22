@@ -132,7 +132,10 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
     console.log(`  Warning: Could not find ${funcName} function`);
   }
 
-  // Step 4: Remove the overlay div (click-outside backdrop).
+  // Step 4: Replace the overlay div (click-outside backdrop) with the resize handle.
+  // The overlay sits exactly between the chat column and the panel in #root's flex
+  // row, so its slot is where the drag handle belongs (behaviour: RESIZE_SCRIPT,
+  // look: patchSessionsPanelCss).
   //
   // Supports BOTH element-creation forms:
   //   - classic:  X.default.createElement("div",{className:VAR.overlay,onMouseDown:...})
@@ -161,11 +164,14 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
       }
     }
     if (depth === 0 && end > overlayOpenIdx) {
-      if (patched[end] === ",") end++; // consume the comma separating it from the dropdown sibling
+      const helper = patched.substring(elemStart, overlayOpenIdx);
       const removed = patched.substring(elemStart, end);
-      patched = patched.substring(0, elemStart) + patched.substring(end);
+      patched =
+        patched.substring(0, elemStart) +
+        `${helper}("div",{className:"cce-sash","aria-hidden":"true"})` +
+        patched.substring(end);
       count++;
-      console.log(`  Removed overlay backdrop element: ${removed.substring(0, 80)}...`);
+      console.log(`  Replaced overlay backdrop with resize handle: ${removed.substring(0, 80)}...`);
     } else {
       console.log("  Warning: could not bracket-match overlay element; skipped (CSS still hides it)");
     }
@@ -208,6 +214,52 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
   }
 
   return { patched, count };
+}
+
+// ── Webview JS patches: drag-to-resize the sessions panel ──
+// Appended to the bundle. Works purely by event delegation on the `.cce-sash`
+// element that patchWebviewJs puts next to the panel, so it needs no anchors in
+// the minified code. Like a VS Code sash: drag to resize, double-click to reset.
+// The width lives in a CSS variable on <html> (read by patchWebviewCss's panel
+// rule) and in the webview's localStorage, so it survives reloads.
+function appendResizeScript(code: string, dropdownClass: string): { patched: string; count: number } {
+  const script = `
+;/* cce-patch: drag-to-resize the sessions panel */(()=>{try{
+var KEY="cce-sessions-width",PANEL=${JSON.stringify(dropdownClass)},MIN=160,CHAT_MIN=300,
+html=document.documentElement,drag=null,
+setWidth=function(w){html.style.setProperty("--cce-sessions-w",w+"px")},
+sashOf=function(t){return t instanceof Element?t.closest(".cce-sash"):null};
+try{var saved=parseInt(localStorage.getItem(KEY)||"",10);if(saved>0)setWidth(saved)}catch(e){}
+addEventListener("pointerdown",function(e){
+  var sash=sashOf(e.target),panel=sash&&sash.nextElementSibling;
+  if(!sash||e.button!==0||!panel||!panel.classList.contains(PANEL))return;
+  e.preventDefault();
+  var r=panel.getBoundingClientRect();
+  drag={sash:sash,right:r.right,grab:r.right-e.clientX-r.width,max:sash.parentElement.clientWidth-CHAT_MIN,width:0};
+  try{sash.setPointerCapture(e.pointerId)}catch(_){}
+  sash.classList.add("cce-sash-active");html.classList.add("cce-resizing");
+},true);
+addEventListener("pointermove",function(e){
+  if(!drag)return;
+  drag.width=Math.round(Math.max(MIN,Math.min(drag.right-e.clientX-drag.grab,drag.max)));
+  setWidth(drag.width);
+},true);
+var endDrag=function(){
+  if(!drag)return;
+  drag.sash.classList.remove("cce-sash-active");html.classList.remove("cce-resizing");
+  if(drag.width)try{localStorage.setItem(KEY,String(drag.width))}catch(_){}
+  drag=null;
+};
+addEventListener("pointerup",endDrag,true);addEventListener("pointercancel",endDrag,true);
+addEventListener("dblclick",function(e){
+  if(!sashOf(e.target))return;
+  html.style.removeProperty("--cce-sessions-w");
+  try{localStorage.removeItem(KEY)}catch(_){}
+},true);
+}catch(e){}})();
+`;
+  console.log("  Appended panel resize script");
+  return { patched: code + script, count: 1 };
 }
 
 // ── Webview JS patches: session status dots ──
@@ -409,16 +461,20 @@ function patchWebviewCss(css: string, jsCode: string): { patched: string; count:
       dropdownMatch[0],
       `.${dropdownClass}{` +
         "position:relative !important;" +
-        "background:var(--app-menu-background);" +
-        "border-left:1px solid var(--app-menu-border);" +
+        "box-sizing:border-box;" +
+        // A VS Code side view rather than a popup menu: sidebar background and border.
+        "background:var(--vscode-sideBar-background,var(--app-menu-background));" +
+        "border-left:1px solid var(--vscode-sideBar-border,var(--vscode-panel-border,var(--app-menu-border)));" +
         "border-radius:0;" +
         "display:flex;" +
         "z-index:1;" +
         "outline:none;" +
         "flex-direction:column;" +
-        "width:20%;" +
-        "min-width:200px;" +
-        "max-width:350px;" +
+        // Dragged width (set by the resize script) or the original 20% / 200–350px
+        // default; the chat always keeps at least 300px.
+        "width:var(--cce-sessions-w,clamp(200px,20%,350px));" +
+        "min-width:160px;" +
+        "max-width:max(160px,calc(100% - 300px));" +
         "max-height:none !important;" +
         "height:100% !important;" +
         "box-shadow:none;" +
@@ -481,6 +537,76 @@ function patchWebviewCss(css: string, jsCode: string): { patched: string; count:
   }
 
   return { patched, count };
+}
+
+// ── Webview CSS patches: sessions panel look + resize handle ──
+// Makes the panel read like a native VS Code view (the Explorer and the workbench
+// tab strips are the reference), using only VS Code theme tokens so it follows any
+// theme. Everything is scoped to the panel this patch adds: the standalone Session
+// Manager view renders the same list and keeps its upstream look.
+function patchSessionsPanelCss(css: string, jsCode: string): { patched: string; count: number } {
+  const dropdown = jsCode.match(/dropdown:"(dropdown_\w+)"/)?.[1];
+  const listModule = jsCode.match(/[\w$]+=\{[^}]*sessionItem:"sessionItem_\w+"[^}]*\}/)?.[0];
+  if (!dropdown || !listModule) {
+    console.log("  Could not find the panel or sessions list CSS classes");
+    return { patched: css, count: 0 };
+  }
+  const listClass = (k: string) => listModule.match(new RegExp(`\\b${k}:"(${k}_\\w+)"`))?.[1];
+  const P = `.${dropdown}`;
+  const titleLine = "border-bottom:1px solid var(--app-primary-border-color,var(--vscode-panel-border))";
+  // [selector, declarations]; `{name}` is that sessions-list class.
+  const rules: [string, string][] = [
+    // Resize handle: a VS Code sash — 4px grab area over the divider, the theme's
+    // highlight after a short hover (as in VS Code) and while dragging.
+    [".cce-sash", "position:relative;flex:0 0 0;width:0;z-index:5"],
+    [".cce-sash::before", 'content:"";position:absolute;top:0;bottom:0;left:-2px;width:4px;cursor:ew-resize;background:transparent;transition:background-color .1s ease-out'],
+    [".cce-sash:hover::before", "background:var(--vscode-sash-hoverBorder,var(--vscode-focusBorder));transition-delay:.3s"],
+    [".cce-sash.cce-sash-active::before", "background:var(--vscode-sash-hoverBorder,var(--vscode-focusBorder));transition-delay:0s"],
+    ["html.cce-resizing,html.cce-resizing *", "cursor:ew-resize !important;user-select:none !important"],
+    // Workbench font instead of the chat font.
+    [`${P} .{root}`, "font-family:var(--vscode-font-family);font-size:var(--vscode-font-size,13px)"],
+    // Local / Web: a workbench tab strip. The row mirrors the chat header's box
+    // (6px padding, 28px controls, 1px bottom line) so both read as one title bar.
+    [`${P} .{root}>.{segmented}`, `background:none;border-radius:0;gap:4px;padding:6px 8px;align-items:center;${titleLine}`],
+    [`${P} .{tab}`, "flex:0 0 auto;height:28px;box-sizing:border-box;gap:0;padding:0 10px;border-radius:4px;font-size:inherit;color:var(--vscode-descriptionForeground)"],
+    [`${P} .{tab}:hover`, "color:var(--vscode-foreground)"],
+    [`${P} .{tab}.{tabActive}`, "background:var(--vscode-list-inactiveSelectionBackground,var(--vscode-toolbar-hoverBackground));color:var(--vscode-foreground);box-shadow:none"],
+    [`${P} .{tabIcon}`, "display:none"],
+    // Search: a standard VS Code input. Without the tabs (API-key login) the search
+    // row comes first, so it carries the title-bar line instead.
+    [`${P} .{searchRow}`, "padding:6px 8px"],
+    [`${P} .{root}>.{searchRow}:first-child`, `min-height:41px;box-sizing:border-box;${titleLine}`],
+    [`${P} .{searchIcon}`, "left:8px"],
+    [`${P} .{searchInput}`, "height:26px;box-sizing:border-box;margin:0;padding:3px 8px 3px 28px;border:1px solid var(--vscode-input-border,transparent);border-radius:4px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit"],
+    [`${P} .{searchInput}:focus`, "outline:1px solid var(--vscode-focusBorder);outline-offset:-1px;border-color:transparent"],
+    [`${P} .{searchInput}::placeholder`, "color:var(--vscode-input-placeholderForeground);opacity:1"],
+    // Sessions: Explorer rows — 22px, no gaps, regular weight, selection highlight.
+    [`${P} .{content}`, "padding:0 6px 6px"],
+    [`${P} .{sessionsList}`, "gap:0"],
+    [`${P} .{sessionItem}`, "height:22px;gap:6px;padding:0 8px;border-radius:4px"],
+    [`${P} .{sessionItem}.{active}`, "background:var(--vscode-list-inactiveSelectionBackground,var(--app-list-active-background));color:var(--vscode-list-inactiveSelectionForeground,var(--vscode-foreground))"],
+    [`${P} .{sessionItem}.{active} .{sessionName}`, "font-weight:400;color:inherit"],
+    [`${P} .{sessionItem}:focus-visible`, "outline:1px solid var(--vscode-list-focusOutline,var(--vscode-focusBorder));outline-offset:-1px"],
+    [`${P} .{actionButton}`, "padding:1px"],
+    [`${P} .{actionIcon}`, "width:16px;height:16px"],
+    // "Archived sessions": a tree folder row, with VS Code's count badge.
+    [`${P} .{groupHeader}`, "height:22px;margin-top:0;gap:4px;padding:0 8px 0 4px;border-radius:4px"],
+    [`${P} .{groupChevron}`, "width:16px;height:16px;color:var(--vscode-icon-foreground,var(--vscode-foreground))"],
+    [`${P} .{groupName}`, "font-size:inherit;font-weight:400;color:var(--vscode-foreground)"],
+    [`${P} .{groupCount}`, "box-sizing:border-box;min-width:18px;height:18px;padding:0 5px;border-radius:11px;font-size:11px;line-height:18px;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)"],
+  ];
+  let out = "\n/* cce-patch: sessions panel — VS Code look + resize handle */";
+  const skipped: string[] = [];
+  for (const [template, declarations] of rules) {
+    const missing = [...template.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).filter((k) => !listClass(k));
+    if (missing.length > 0) { skipped.push(...missing); continue; }
+    out += `\n${template.replace(/\{(\w+)\}/g, (_m, k) => listClass(k)!)}{${declarations}}`;
+  }
+  console.log(
+    `  Added VS Code panel look + resize handle CSS` +
+    (skipped.length ? ` (skipped rules for missing classes: ${[...new Set(skipped)].join(", ")})` : "")
+  );
+  return { patched: css + out, count: 1 };
 }
 
 // ── Webview CSS patches: session status dots ──
@@ -829,6 +955,16 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   wvJsCode = dotsResult.patched;
   wvJsCount += dotsResult.count;
 
+  console.log("\n[webview/index.js — panel resize]");
+  const panelClass = wvJsOriginal.match(/dropdown:"(dropdown_\w+)"/)?.[1];
+  if (panelClass && wvJsCode.includes('className:"cce-sash"')) {
+    const resizeResult = appendResizeScript(wvJsCode, panelClass);
+    wvJsCode = resizeResult.patched;
+    wvJsCount += resizeResult.count;
+  } else {
+    console.log("  Skipped: no resize handle in the panel (overlay element not found)");
+  }
+
   // Verify the sidebar actually got wired up. The CSS patches apply independently,
   // so without this check a failed JS anchor looks like a partial success: the panel
   // is styled as a sidebar but never rendered. Fail loudly instead.
@@ -838,6 +974,7 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
     ["isOpen forced true", /[\w$]+,\{isOpen:!0,onClose:/.test(wvJsCode)],
     ["status dot injected", wvJsCode.includes("cce-status-dot")],
     ["current file/selection not attached by default", selResult.count > 0],
+    ["panel resize handle added", wvJsCode.includes("cce-patch: drag-to-resize the sessions panel")],
   ];
   let failed = 0;
   for (const [name, pass] of checks) {
@@ -848,7 +985,7 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
     console.log(
       `\n  !! ${failed} check(s) failed — the extension bundle likely changed shape.\n` +
       `     Each FAIL above needs its patch function's anchors updated for this version\n` +
-      `     (sidebar: patchWebviewJs, dots: patchSessionStatusDots,\n` +
+      `     (sidebar + resize handle: patchWebviewJs, dots: patchSessionStatusDots,\n` +
       `      selection: patchIncludeSelectionDefault / patchSelectionOptIn).`
     );
   }
@@ -869,6 +1006,11 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   const sidebarCssResult = patchWebviewCss(wvCssCode, wvJsOriginal);
   wvCssCode = sidebarCssResult.patched;
   wvCssCount += sidebarCssResult.count;
+
+  console.log("\n[webview/index.css — panel look + resize handle]");
+  const panelCssResult = patchSessionsPanelCss(wvCssCode, wvJsOriginal);
+  wvCssCode = panelCssResult.patched;
+  wvCssCount += panelCssResult.count;
 
   console.log("\n[webview/index.css — status dots]");
   const dotsCssResult = patchStatusDotsCss(wvCssCode);
