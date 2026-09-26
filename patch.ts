@@ -580,17 +580,18 @@ function patchSessionsPanelCss(css: string, jsCode: string): { patched: string; 
     [`${P} .{searchInput}`, "height:26px;box-sizing:border-box;margin:0;padding:3px 8px 3px 28px;border:1px solid var(--vscode-input-border,transparent);border-radius:4px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit"],
     [`${P} .{searchInput}:focus`, "outline:1px solid var(--vscode-focusBorder);outline-offset:-1px;border-color:transparent"],
     [`${P} .{searchInput}::placeholder`, "color:var(--vscode-input-placeholderForeground);opacity:1"],
-    // Sessions: Explorer rows — 22px, no gaps, regular weight, selection highlight.
+    // Sessions: Explorer-style rows — no gaps, regular weight, selection highlight —
+    // at 28px, a little roomier than the Explorer's 22px.
     [`${P} .{content}`, "padding:0 6px 6px"],
     [`${P} .{sessionsList}`, "gap:0"],
-    [`${P} .{sessionItem}`, "height:22px;gap:6px;padding:0 8px;border-radius:4px"],
+    [`${P} .{sessionItem}`, "height:28px;gap:6px;padding:0 8px;border-radius:4px"],
     [`${P} .{sessionItem}.{active}`, "background:var(--vscode-list-inactiveSelectionBackground,var(--app-list-active-background));color:var(--vscode-list-inactiveSelectionForeground,var(--vscode-foreground))"],
     [`${P} .{sessionItem}.{active} .{sessionName}`, "font-weight:400;color:inherit"],
     [`${P} .{sessionItem}:focus-visible`, "outline:1px solid var(--vscode-list-focusOutline,var(--vscode-focusBorder));outline-offset:-1px"],
     [`${P} .{actionButton}`, "padding:1px"],
     [`${P} .{actionIcon}`, "width:16px;height:16px"],
     // "Archived sessions": a tree folder row, with VS Code's count badge.
-    [`${P} .{groupHeader}`, "height:22px;margin-top:0;gap:4px;padding:0 8px 0 4px;border-radius:4px"],
+    [`${P} .{groupHeader}`, "height:28px;margin-top:0;gap:4px;padding:0 8px 0 4px;border-radius:4px"],
     [`${P} .{groupChevron}`, "width:16px;height:16px;color:var(--vscode-icon-foreground,var(--vscode-foreground))"],
     [`${P} .{groupName}`, "font-size:inherit;font-weight:400;color:var(--vscode-foreground)"],
     [`${P} .{groupCount}`, "box-sizing:border-box;min-width:18px;height:18px;padding:0 5px;border-radius:11px;font-size:11px;line-height:18px;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)"],
