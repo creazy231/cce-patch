@@ -35,6 +35,10 @@ Each session displays a colored status indicator:
 
 The "Include Selection" toggle in the chat input defaults to **off** instead of on, preventing accidental context injection.
 
+### Drafts Kept Per Session
+
+Start typing in a session, switch to another one, come back — your **text, `@`-mentions and attachments are still there**, with the caret at the end. Works for new and existing sessions alike; sending the message clears the draft. The text of existing sessions also survives a window reload (kept in the webview's local storage for 30 days); attachments are kept for as long as the window is open.
+
 ### Multi-Editor Support
 
 Automatically detects and patches **all installed editors** in a single run:
@@ -106,7 +110,7 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 | File | What Changes |
 |------|-------------|
 | `extension.js` | Enables `sessionsListEnabled` and `primaryEditorEnabled` feature flags |
-| `webview/index.js` | Removes dropdown close behavior, injects status dot elements, defaults "Include Selection" to off |
+| `webview/index.js` | Removes dropdown close behavior, injects status dot elements, defaults "Include Selection" to off, keeps each session's draft |
 | `webview/index.css` | Restyles the dropdown as a fixed sidebar panel, adds status dot styles with pulse animations |
 
 ### Safety

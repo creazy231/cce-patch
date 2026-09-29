@@ -2,7 +2,8 @@
 /**
  * Claude Code Extension Patch
  * Makes the sessions list permanently visible alongside the chat (80/20 split)
- * adds colored status dots to each session, and defaults reasoning effort to max.
+ * adds colored status dots to each session, defaults reasoning effort to max,
+ * and keeps each session's unsent draft (text, @-mentions, attachments).
  *
  * Status dots:
  *   🟢 green  = job done, not yet viewed
@@ -775,6 +776,132 @@ function patchSelectionCss(css: string): { patched: string; count: number } {
   return { patched: css + rules, count: 1 };
 }
 
+// ── Webview JS patches: keep each session's draft ──
+// Switching sessions remounts the chat view (the app keys it by the session's
+// internalId), and a half-written message lives in component state that dies with
+// it: the text in the input's `useState("")` (next to the set of @-mentions it
+// highlights), the attachments in the chat view's `useState([])`. Keep the draft
+// on the session object instead, which outlives the view:
+//   • the input and the chat view start from session.cceDraft instead of empty
+//   • effects write every change back, so sending (which empties both) clears it
+//   • on mount the text goes back into the contentEditable; the caret moves to the
+//     end on the input's first focus, so restoring never takes focus itself
+//   • an existing session's text (not its attachments: images run to megabytes)
+//     is mirrored to localStorage as `cce-draft:<sessionId>`, so drafts survive a
+//     window reload; entries not written for 30 days are dropped
+// The runtime is prepended to the bundle (a plain script) so it exists before the
+// first render; every call is guarded, a draft must never break the input.
+const DRAFT_RUNTIME = `/* cce-patch: per-session drafts */window.__cceDraft=(()=>{
+var PREFIX="cce-draft:",MAX_AGE=30*864e5,pruned=!1,
+key=function(s){var id=s.sessionId&&s.sessionId.value;return id?PREFIX+(s.isRemote&&s.isRemote.value?"remote:":"")+id:null},
+load=function(k){try{var v=JSON.parse(localStorage.getItem(k)||"null");return v&&typeof v.text==="string"?v:null}catch(e){return null}},
+drop=function(k){try{localStorage.removeItem(k)}catch(e){}},
+prune=function(){if(pruned)return;pruned=!0;try{for(var i=localStorage.length-1;i>=0;i--){
+  var k=localStorage.key(i),v=k&&k.indexOf(PREFIX)===0?load(k):0;if(v===null||v&&!(Date.now()-v.t<MAX_AGE))drop(k)}}catch(e){}},
+draft=function(s){if(s.cceDraft)return s.cceDraft;prune();var k=key(s),v=k&&load(k);
+  return s.cceDraft={text:v?v.text:"",mentions:v&&Array.isArray(v.mentions)?v.mentions:[],files:[],key:v?k:null}};
+return{
+text:function(s){try{return draft(s).text}catch(e){return""}},
+mentions:function(s){try{return new Set(draft(s).mentions)}catch(e){return new Set}},
+files:function(s){try{return draft(s).files}catch(e){return[]}},
+saveInput:function(s,text,mentions){try{
+  var d=draft(s),k=key(s);d.text=text;d.mentions=Array.from(mentions);
+  if(d.key&&d.key!==k)drop(d.key);d.key=k;if(!k)return;
+  if(text.trim())localStorage.setItem(k,JSON.stringify({t:Date.now(),text:text,mentions:d.mentions}));else drop(k);
+}catch(e){}},
+saveFiles:function(s,files){try{draft(s).files=files}catch(e){}},
+restore:function(el,text){try{
+  if(!el||!text||el.textContent)return;el.textContent=text;
+  var end=function(){try{var r=document.createRange(),sel=getSelection();r.selectNodeContents(el);r.collapse(!1);sel.removeAllRanges();sel.addRange(r)}catch(e){}};
+  if(document.activeElement===el)end();else el.addEventListener("focus",end,{once:!0});
+}catch(e){}}
+}})();
+`;
+
+function patchDraftPersistence(code: string): { patched: string; count: number } {
+  // The message input: forwardRef(function({session:S,onSubmit:…},REF){HOOK();let[TEXT,SET]=useState("")…
+  const inputs = [...code.matchAll(/\(function\(\{session:([\w$]+),onSubmit:[^)]*?\},[\w$]+\)\{[\w$]+\(\);let\[([\w$]+),[\w$]+\]=([\w$]+)\(""\)/g)];
+  const input = inputs.length === 1 ? inputs[0] : undefined;
+  const [, s = "", text = "", useState = ""] = input ?? [];
+  const inputAt = input?.index ?? -1;
+  const inputHead = code.substring(inputAt, inputAt + 5000);
+  // …its @-mention set, `[M,SET]=useState(()=>new Set)`, and the ref of its
+  // contentEditable, both declared at the top of the same component.
+  const mentions = input && inputHead.match(new RegExp(`\\[([\\w$]+),[\\w$]+\\]=${escRe(useState)}\\(\\(\\)=>new Set\\)`));
+  const editable = input && code.substring(inputAt, inputAt + 60000).match(/\("div",\{ref:([\w$]+),contentEditable:"plaintext-only"/)?.[1];
+  const editableOwn = !!editable && new RegExp(`(?<![\\w$])${escRe(editable)}=[\\w$]+\\(null\\)`).test(inputHead);
+
+  // React's hook exports keep their source shape, `o=function($,J){return Bz.current.useEffect($,J)}`;
+  // take the effects from the same React as the input's useState.
+  const hooks = (name: string) =>
+    [...code.matchAll(new RegExp(`([\\w$]+)=function\\(([\\w$]+)(?:,([\\w$]+))?\\)\\{return ([\\w$]+)\\.current\\.${name}\\(\\2(?:,\\3)?\\)\\}`, "g"))]
+      .map((m) => ({ name: m[1], dispatcher: m[4] }));
+  const dispatcher = hooks("useState").find((h) => h.name === useState)?.dispatcher;
+  const useEffect = dispatcher && hooks("useEffect").find((h) => h.dispatcher === dispatcher)?.name;
+  const useLayoutEffect = dispatcher && hooks("useLayoutEffect").find((h) => h.dispatcher === dispatcher)?.name;
+
+  // The chat view, function CHAT({session:S,context:C,onCreateNewSession:…}){HOOK();…
+  // Its attachments are the state it hands the input as `attachedFiles:FILES,onRemoveFile:`.
+  const chat = code.match(/function [\w$]+\(\{session:([\w$]+),context:[\w$]+,onCreateNewSession:[^)]*\}\)\{[\w$]+\(\);/);
+  const chatAt = chat?.index ?? -1;
+  const files = chat && code.substring(chatAt, chatAt + 150000).match(/attachedFiles:([\w$]+),onRemoveFile:/)?.[1];
+  const filesState = files && code.substring(chatAt, chatAt + 5000)
+    .match(new RegExp(`\\[${escRe(files)},[\\w$]+\\]=${escRe(useState)}\\(\\[\\]\\)`));
+
+  // All or nothing: restoring without saving (or the reverse) would be worse than neither.
+  const missing = [
+    !input && (inputs.length > 1 ? "unique message input" : "message input"),
+    input && !mentions && "input @-mention state",
+    input && !editableOwn && "input contentEditable",
+    input && !useEffect && "useEffect",
+    input && !useLayoutEffect && "useLayoutEffect",
+    !chat && "chat view",
+    chat && !files && "chat view attachments",
+    files && !filesState && "attachments state",
+  ].filter(Boolean);
+  if (missing.length > 0 || !input || !mentions || !editable || !useEffect || !useLayoutEffect || !chat || !files || !filesState) {
+    console.log(`  Could not find the message input or its chat view (missing: ${missing.join(", ")})`);
+    return { patched: code, count: 0 };
+  }
+
+  // Upstream counts text in the input as typing for 1.5s (`promptInputActive`, which
+  // holds back a pending permission prompt). A restored draft isn't typing: clear
+  // the flag right after that effect's first run. Optional — without it, a pending
+  // permission prompt just shows 1.5s late in a session that had a draft.
+  const typingEffect = code.substring(inputAt, inputAt + 60000).match(new RegExp(
+    `\\(\\(\\)=>\\{let ([\\w$]+)=${escRe(text)}\\.trim\\(\\)\\.length>0;if\\(${escRe(s)}\\.promptInputActive\\.value=\\1,!\\1\\)return;[^]*?\\},\\[${escRe(text)},${escRe(s)}\\]\\);`,
+  ));
+
+  const D = "window.__cceDraft";
+  const m = mentions[1];
+  const cs = chat[1];
+  const edits: [at: number, length: number, insert: string][] = [
+    // The text starts from the draft.
+    [inputAt + input[0].length - '("")'.length, '("")'.length, `(()=>${D}.text(${s}))`],
+    // So do the @-mentions; both are saved on every change (and when the session
+    // gets its id), and the text is put back into the contentEditable on mount.
+    [inputAt + mentions.index!, mentions[0].length,
+      mentions[0].slice(0, -"(()=>new Set)".length) + `(()=>${D}.mentions(${s}))` +
+      `,__cceDraftInput=(${useEffect}(()=>{${D}.saveInput(${s},${text},${m})},[${s},${text},${m},${s}.sessionId?.value]),` +
+      `${useLayoutEffect}(()=>{${D}.restore(${editable}.current,${text})},[]),0)`],
+    // The attachments start from the draft and are saved on every change.
+    [chatAt + filesState.index!, filesState[0].length,
+      filesState[0].slice(0, -"([])".length) + `(()=>${D}.files(${cs}))` +
+      `,__cceDraftFiles=${useEffect}(()=>{${D}.saveFiles(${cs},${files})},[${cs},${files}])`],
+  ];
+  if (typingEffect) {
+    edits.push([inputAt + typingEffect.index! + typingEffect[0].length, 0,
+      `${useEffect}(()=>{if(${text})${s}.promptInputActive.value=!1},[]);`]);
+  }
+  let patched = code;
+  for (const [at, length, str] of edits.sort((a, b) => b[0] - a[0])) {
+    patched = patched.slice(0, at) + str + patched.slice(at + length);
+  }
+  console.log(`  Drafts kept per session (input: text ${text}, mentions ${m}, editable ${editable}; chat view: attachments ${files})`);
+  if (!typingEffect) console.log("  Note: typing-activity effect not found — a restored draft holds back a pending permission prompt for 1.5s");
+  return { patched: DRAFT_RUNTIME + patched, count: edits.length + 1 };
+}
+
 // ── Webview JS patches: default reasoning effort to max ──
 function patchDefaultEffortMax(code: string): { patched: string; count: number } {
   let patched = code;
@@ -956,6 +1083,11 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   wvJsCode = dotsResult.patched;
   wvJsCount += dotsResult.count;
 
+  console.log("\n[webview/index.js — session drafts]");
+  const draftResult = patchDraftPersistence(wvJsCode);
+  wvJsCode = draftResult.patched;
+  wvJsCount += draftResult.count;
+
   console.log("\n[webview/index.js — panel resize]");
   const panelClass = wvJsOriginal.match(/dropdown:"(dropdown_\w+)"/)?.[1];
   if (panelClass && wvJsCode.includes('className:"cce-sash"')) {
@@ -976,6 +1108,7 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
     ["status dot injected", wvJsCode.includes("cce-status-dot")],
     ["current file/selection not attached by default", selResult.count > 0],
     ["panel resize handle added", wvJsCode.includes("cce-patch: drag-to-resize the sessions panel")],
+    ["drafts kept per session", draftResult.count > 0],
   ];
   let failed = 0;
   for (const [name, pass] of checks) {
@@ -987,7 +1120,8 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
       `\n  !! ${failed} check(s) failed — the extension bundle likely changed shape.\n` +
       `     Each FAIL above needs its patch function's anchors updated for this version\n` +
       `     (sidebar + resize handle: patchWebviewJs, dots: patchSessionStatusDots,\n` +
-      `      selection: patchIncludeSelectionDefault / patchSelectionOptIn).`
+      `      selection: patchIncludeSelectionDefault / patchSelectionOptIn,\n` +
+      `      drafts: patchDraftPersistence).`
     );
   }
 

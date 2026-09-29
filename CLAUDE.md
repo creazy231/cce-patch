@@ -9,6 +9,7 @@ A patcher script (`patch.ts`) that modifies the Claude Code VS Code extension to
 - **Live status dots** — colored indicators on each session (green=done, blue=running, orange=waiting, gray=seen)
 - **Include Selection default off** — the open file / selected lines are not attached to prompts unless you opt in, per session (dimmed chip in the input footer, click to attach)
 - **Reasoning effort default max** — sets effort to "max" on every new session
+- **Drafts kept per session** — text, @-mentions and attachments you haven't sent survive switching sessions; an existing session's text also survives a window reload
 
 It auto-detects and patches all installed editors (VS Code, VS Code Insiders, Cursor, VSCodium).
 
@@ -40,9 +41,10 @@ The entire patcher is a single file: `patch.ts`. No build step, no dependencies 
 4. **`patchDefaultEffortMax`** — Changes the `effortLevel` observable default from `void 0` (Auto) to `"max"` in `webview/index.js`
 5. **`patchExtensionEffortMax`** — Makes `extension.js` pass `--effort max` to the CLI by default (unless explicitly overridden)
 6. **`patchSessionStatusDots`** — Injects status computation code and a `<span class="cce-status-dot">` element into the session item renderer
-7. **`patchWebviewCss`** — Restyles the dropdown as a fixed sidebar, hides the overlay, makes the body a horizontal flex container. **`patchSessionsPanelCss`** adds the VS Code look (theme tokens only, scoped to the panel so the Session Manager view keeps its upstream style) and the resize handle's style
-8. **`patchStatusDotsCss`** — Appends dot color/animation CSS
-9. **`patchSelectionCss`** — Appends the dimmed (not attached) selection chip style
+7. **`patchDraftPersistence`** — The chat view is keyed by the session's `internalId`, so switching sessions remounts it and drops the input's text/@-mention state and the chat view's attachments state. Seeds those states from `session.cceDraft` and saves every change back via effects (a send empties both, which clears the draft); the text is written back into the contentEditable on mount, caret at the end on first focus. Existing sessions' text is mirrored to localStorage (`cce-draft:<sessionId>`, pruned after 30 days). The `window.__cceDraft` runtime is prepended to the bundle
+8. **`patchWebviewCss`** — Restyles the dropdown as a fixed sidebar, hides the overlay, makes the body a horizontal flex container. **`patchSessionsPanelCss`** adds the VS Code look (theme tokens only, scoped to the panel so the Session Manager view keeps its upstream style) and the resize handle's style
+9. **`patchStatusDotsCss`** — Appends dot color/animation CSS
+10. **`patchSelectionCss`** — Appends the dimmed (not attached) selection chip style
 
 ### How patching works
 
