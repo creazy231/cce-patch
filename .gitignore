@@ -5,6 +5,8 @@ node_modules/
 dist/
 *.js
 !*.config.js
+# claude-commit/ is a plain-JavaScript VS Code extension (no build step)
+!claude-commit/**/*.js
 
 # OS files
 .DS_Store

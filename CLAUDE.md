@@ -13,21 +13,29 @@ A patcher script (`patch.ts`) that modifies the Claude Code VS Code extension to
 
 It auto-detects and patches all installed editors (VS Code, VS Code Insiders, Cursor, VSCodium).
 
+Separately, `claude-commit/` is a small companion VS Code extension (not a patch): a **Generate Commit Message with Claude** button for the Source Control view that does what the built-in ✨ Copilot button does, answered by Claude Haiku through the user's Claude Code login. `patch.ts` installs it into the editors it patches (`--revert` removes it, `--no-commit-button` skips it). `bun run claude-commit/install.ts` manages it on its own.
+
 ## Running
 
 ```bash
-# Apply patch (Bun recommended)
+# Apply patch (Bun recommended); also installs the claude-commit button
 bun run patch.ts
 
-# Revert
+# Revert (also uninstalls the button)
 bun run patch.ts --revert
+
+# Patch without touching the button
+bun run patch.ts --no-commit-button
 
 # Alternative with Node.js
 npx tsx patch.ts
 npx tsx patch.ts --revert
+
+# claude-commit tests
+bun test claude-commit/test
 ```
 
-After patching, restart each editor with `Reload Window`.
+After patching, restart each editor with `Reload Window`. The commit button's move into the commit message box needs a full restart (`argv.json`).
 
 ## Architecture
 
@@ -46,6 +54,8 @@ The entire patcher is a single file: `patch.ts`. No build step, no dependencies 
 9. **`patchStatusDotsCss`** — Appends dot color/animation CSS
 10. **`patchSelectionCss`** — Appends the dimmed (not attached) selection chip style
 
+After all editors: **`installCommitButton`** (from `claude-commit/install.ts`) installs the commit message button into the same editors, matched by label. It runs even if a patch failed and skips editors whose installed copy is identical *and* still listed in `extensions.json` (an uninstall leaves the folder behind). With `--revert` it uninstalls instead; `--no-commit-button` skips it.
+
 ### How patching works
 
 All patches operate on **minified, bundled JS/CSS** via regex and string matching against known code patterns (CSS module variable names, function signatures, `createElement` calls). The script:
@@ -56,3 +66,17 @@ All patches operate on **minified, bundled JS/CSS** via regex and string matchin
 ### Key pattern-matching strategy
 
 The script finds dynamically-generated CSS class names (e.g., `overlay_abc12`, `dropdown_xyz34`) by matching CSS module object literals in the bundled JS, then uses those class names to locate and modify both JS behavior and CSS rules. This is fragile by nature — extension updates may change the bundle structure.
+
+## claude-commit/ (commit message button)
+
+A plain-CommonJS VS Code extension (`cce-patch.claude-commit-message`, no build step, no dependencies; `.gitignore` re-includes its `*.js`). It mirrors the built-in Copilot commit-message generator (Copilot Chat 0.70 in VS Code Insiders 1.142) and swaps the model call for one `claude -p` call:
+
+- **`lib/context.js`** — Copilot's input: staged changes, else working tree + untracked; per-file diffs (`diffIndexWithHEAD` / synthetic untracked patch / `diffWithHEAD`, cut at 100 000 chars); the last 5 commit subjects from the repo and from `user.name`; current file contents ("ORIGINAL CODE", skipped for new files, and read only while they fit the 300 000-char budget next to the diffs); `github.copilot.chat.commitMessageGeneration.instructions` from all settings scopes (folder → workspace → user, as Copilot merges them), files before texts, language-tagged entries skipped
+- **`lib/prompt.js`** — Copilot's prompt texts verbatim (system message, section headings, reminder, instruction intro) in its section structure (XML-style tags, legacy line numbers). One difference: ORIGINAL CODE is a fenced block with a `filepath:` comment, where Copilot uses an attachment tag. Also a 300 000-char budget (largest original code dropped first, then diffs share the rest) and Copilot's ```text block parsing
+- **`lib/claude.js`** — finds the CLI (`claudeCommit.claudePath` → the Claude Code extension's `resources/native-binary/claude` → `PATH`). Runs `claude -p --model haiku --safe-mode --tools "" --disable-slash-commands --no-session-persistence --output-format json --system-prompt …` with the prompt on stdin and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (it halves the latency). Handles cancel and timeout. `--bare` would skip the OAuth/keychain login, so it isn't used
+- **`extension.js`** — the command `claudeCommit.generateCommitMessage`, contributed to `scm/inputBox` (the commit message box) and `scm/title` (fallback). Progress shows in the SCM view, and the result goes to `repository.inputBox.value`
+- **`install.ts`** — packs a VSIX (built-in stored-zip writer), installs it with each editor's CLI, and adds the id to `"enable-proposed-api"` in `~/.<editor>/argv.json` (comment-preserving; `--uninstall` reverts). Uses `$(sparkle)` instead of `$(claude)` where the editor lacks that codicon (Cursor)
+
+`scm/inputBox` is a proposed menu (`contribSourceControlInputBoxMenu`). Only `product.json`-allowlisted extensions (just Copilot) or ones named in `--enable-proposed-api` / `argv.json` can use it, and `argv.json` applies after a full restart. The extension reads its runtime `packageJSON.enabledApiProposals` (VS Code empties it when the proposal isn't granted) into the context key `claudeCommit.inputBoxButton`. The `scm/title` button hides itself once the box button is live.
+
+Tests: `bun test claude-commit/test`. To verify end to end without touching a running editor, launch an isolated Insiders: `open -g -n -a "Visual Studio Code - Insiders" --args --user-data-dir=<tmp> --extensions-dir=<tmp> --extensionDevelopmentPath=claude-commit --remote-debugging-port=<port> <repo>`. Dev mode grants the proposal. Then drive the button over the Chrome DevTools Protocol.

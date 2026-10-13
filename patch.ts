@@ -11,12 +11,16 @@
  *   🟠 orange = waiting for input (needs interaction)
  *   ⚫ gray   = job done and viewed
  *
- * Usage: bun run /Volumes/WD_BLACK/PROJECTS/cce-patch/patch.ts [--revert]
+ * It also installs the Claude commit message button (the companion extension in claude-commit/)
+ * into the same editors; --revert uninstalls it, --no-commit-button leaves it alone.
+ *
+ * Usage: bun run /Volumes/WD_BLACK/PROJECTS/cce-patch/patch.ts [--revert] [--no-commit-button]
  */
 
 import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { installCommitButton } from "./claude-commit/install.ts";
 
 const EDITOR_CONFIGS = [
   { label: "VS Code Insiders", extDir: join(homedir(), ".vscode-insiders", "extensions") },
@@ -1173,7 +1177,7 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   return true;
 }
 
-function patch(revert: boolean) {
+function patch(revert: boolean, commitButton: boolean) {
   const editors = findAllExtensionDirs();
   console.log(`Found ${editors.length} editor(s) with Claude Code:\n`);
   for (const { label, dir } of editors) {
@@ -1186,6 +1190,15 @@ function patch(revert: boolean) {
     if (ok) successCount++;
   }
 
+  // The commit message button doesn't depend on the patches, so it goes in even when they fail.
+  let buttonOk = true;
+  if (commitButton) {
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`  Claude commit message button (claude-commit/)`);
+    console.log("=".repeat(60) + "\n");
+    buttonOk = installCommitButton({ only: editors.map((e) => e.label), uninstall: revert });
+  }
+
   if (successCount === 0) {
     console.error("\nNo editors were successfully patched.");
     process.exit(1);
@@ -1193,10 +1206,15 @@ function patch(revert: boolean) {
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  Done: ${successCount}/${editors.length} editor(s) ${revert ? "reverted" : "patched"}.`);
+  if (commitButton) console.log(`  Commit message button: ${buttonOk ? (revert ? "removed" : "installed") : "see the errors above"}.`);
   console.log("=".repeat(60));
   console.log("\nRestart each editor (Cmd+Shift+P → 'Reload Window') to apply.");
+  if (commitButton && !revert) {
+    console.log("The commit message button works right away from the \"Changes\" title bar; it moves into the");
+    console.log("commit message box after the editor's next full restart (quit and reopen).");
+  }
   if (!revert) console.log("To revert: bun run patch.ts --revert");
 }
 
 const revert = process.argv.includes("--revert");
-patch(revert);
+patch(revert, !process.argv.includes("--no-commit-button"));

@@ -39,6 +39,10 @@ The "Include Selection" toggle in the chat input defaults to **off** instead of 
 
 Start typing in a session, switch to another one, come back — your **text, `@`-mentions and attachments are still there**, with the caret at the end. Works for new and existing sessions alike; sending the message clears the draft. The text of existing sessions also survives a window reload (kept in the webview's local storage for 30 days); attachments are kept for as long as the window is open.
 
+### Claude Commit Messages
+
+A **Generate Commit Message with Claude** button for the Source Control view (a small companion extension in [`claude-commit/`](claude-commit/), which `patch.ts` installs into the same editors; see [Usage](#claude-commit-message-button)). It does exactly what the built-in ✨ button does: it reads the staged changes (or all changes when nothing is staged) and your last commit messages, follows your `github.copilot.chat.commitMessageGeneration.instructions`, and fills in the commit message box. The message comes from **Claude Haiku through your Claude Code login**, typically in 2–4 seconds. Click the button again while it runs to stop it.
+
 ### Multi-Editor Support
 
 Automatically detects and patches **all installed editors** in a single run:
@@ -67,11 +71,14 @@ Automatically detects and patches **all installed editors** in a single run:
 ### With Bun (recommended)
 
 ```bash
-# Apply patch to all detected editors
+# Apply patch to all detected editors (also installs the Claude commit message button)
 bun run patch.ts
 
-# Revert all editors to original
+# Revert all editors to original (also removes the button)
 bun run patch.ts --revert
+
+# Patch without touching the commit message button
+bun run patch.ts --no-commit-button
 ```
 
 ### With npm / Node.js
@@ -100,6 +107,26 @@ Restart each patched editor to apply changes:
 
 - **VS Code / Insiders**: `Cmd+Shift+P` (or `Ctrl+Shift+P`) → `Reload Window`
 - **Cursor**: `Cmd+Shift+P` → `Reload Window`
+
+### Claude Commit Message Button
+
+`bun run patch.ts` installs it into every editor it patches, and `bun run patch.ts --revert` removes it again. To patch without it, add `--no-commit-button`. Reruns skip editors that already have the current version. To manage only the button:
+
+```bash
+# Install into every editor that has Claude Code (or name them: insiders, code, cursor, codium)
+bun run claude-commit/install.ts
+bun run claude-commit/install.ts insiders
+
+# Remove it again
+bun run claude-commit/install.ts --uninstall
+```
+
+The installer packs the extension, installs it with the editor's command-line tool (no reload needed), and adds it to `"enable-proposed-api"` in the editor's `argv.json`:
+
+- **Right after installing**, the button (the Claude icon) sits in the title bar of the **Changes** view, left of ✓ and ↻. Like those, it shows while the pointer is over the view.
+- **After the next full restart** of the editor (quit and reopen, not just Reload Window), it moves into the commit message box, where the ✨ button is. VS Code only lets extensions it allows put buttons there, and `argv.json` is read once at startup. When both buttons exist, the box shows one and puts the other behind the ⌄ arrow next to it. Pick **Generate Commit Message with Claude** there once and it stays the one shown.
+
+Settings: `claudeCommit.model` (`haiku` by default, the fastest; `sonnet`, `opus` or a full model name also work) and `claudeCommit.claudePath` (by default the `claude` bundled with the Claude Code extension, then `claude` on `PATH`). Each call is logged in the **Claude Commit Message** output channel.
 
 ---
 
@@ -130,6 +157,8 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 | Patch applied but no visible changes | Restart the editor (`Reload Window`) |
 | Extension updated and patch broke | Run the patch again — it will create fresh backups and re-patch |
 | Want to start fresh | Run `--revert` first, then delete any `.bak` files, then re-patch |
+| Claude commit button only in the "Changes" title bar | Quit and reopen the editor once; `argv.json` changes need a full restart |
+| Claude commit button says Claude Code isn't logged in | Run `claude` in a terminal and log in, or set `claudeCommit.claudePath` |
 
 ---
 

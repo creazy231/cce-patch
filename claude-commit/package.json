@@ -1,0 +1,87 @@
+{
+  "name": "claude-commit-message",
+  "displayName": "Claude Commit Message",
+  "description": "Generate Source Control commit messages with Claude through your Claude Code login, the same way the built-in ✨ button does.",
+  "version": "1.0.1",
+  "publisher": "cce-patch",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionDependencies": [
+    "vscode.git"
+  ],
+  "enabledApiProposals": [
+    "contribSourceControlInputBoxMenu"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeCommit.generateCommitMessage",
+        "title": "Generate Commit Message with Claude",
+        "category": "Claude",
+        "icon": "$(claude)"
+      },
+      {
+        "command": "claudeCommit.cancel",
+        "title": "Cancel Commit Message Generation",
+        "category": "Claude",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "menus": {
+      "scm/inputBox": [
+        {
+          "command": "claudeCommit.generateCommitMessage",
+          "when": "scmProvider == git"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "claudeCommit.generateCommitMessage",
+          "group": "navigation@-1",
+          "when": "scmProvider == git && !claudeCommit.inputBoxButton && !claudeCommit.generating"
+        },
+        {
+          "command": "claudeCommit.cancel",
+          "group": "navigation@-1",
+          "when": "scmProvider == git && !claudeCommit.inputBoxButton && claudeCommit.generating"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claudeCommit.generateCommitMessage",
+          "when": "gitOpenRepositoryCount != 0"
+        },
+        {
+          "command": "claudeCommit.cancel",
+          "when": "claudeCommit.generating"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Commit Message",
+      "properties": {
+        "claudeCommit.model": {
+          "type": "string",
+          "default": "haiku",
+          "markdownDescription": "Claude model for commit messages: an alias (`haiku`, `sonnet`, `opus`) or a full model name. `haiku` is the fastest."
+        },
+        "claudeCommit.claudePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to the `claude` executable. Leave empty to use the one bundled with the Claude Code extension, then `claude` on `PATH`."
+        }
+      }
+    }
+  }
+}
