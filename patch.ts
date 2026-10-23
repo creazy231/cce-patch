@@ -196,14 +196,28 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
   const fnEsc = escRe(funcName);
 
   // Step 6: Force isOpen:!0 in the render call that mounts this component.
-  // Anchors on `<funcName>,{isOpen:VAR,onClose:` so it matches both forms:
+  // Anchors on `<funcName>,{isOpen:EXPR,onClose:` so it matches both forms:
   //   classic:      createElement(nQe,{isOpen:VAR,onClose:...)
   //   JSX runtime:  b(nQe,{isOpen:VAR,onClose:...)
-  const renderRe = new RegExp(`(${fnEsc},\\{isOpen:)[\\w$]+(,onClose:)`);
-  if (renderRe.test(patched)) {
-    patched = patched.replace(renderRe, "$1!0$2");
+  // EXPR starts with the dropdown's open state; 2.1.281 and later also close it while
+  // the host is unresponsive (`isOpen:z&&!q`), so take everything up to `,onClose:`.
+  const renderRe = new RegExp(`(${fnEsc},\\{isOpen:)((${ID})[^,]*)(,onClose:)`);
+  const renderMatch = patched.match(renderRe);
+  if (renderMatch) {
+    patched = patched.replace(renderRe, "$1!0$4");
     count++;
-    console.log(`  Forced isOpen:!0 in render call`);
+    console.log(`  Forced isOpen:!0 in render call (was: ${renderMatch[2]})`);
+
+    // Step 6b: 2.1.309 builds the list only while the dropdown is open
+    // (`localSessions:z?S.listedSessions():[]`), which leaves the panel empty: build
+    // it unconditionally.
+    const openVar = escRe(renderMatch[3]);
+    const gateRe = new RegExp(`(${fnEsc},\\{isOpen:!0,onClose:[^]{0,600}?localSessions:)${openVar}\\?([^:]+):\\[\\]`);
+    if (gateRe.test(patched)) {
+      patched = patched.replace(gateRe, "$1$2");
+      count++;
+      console.log(`  Sessions list no longer built only while the dropdown is open`);
+    }
   } else if (new RegExp(`${fnEsc},\\{isOpen:!0,onClose:`).test(patched)) {
     console.log(`  Already forced isOpen:!0 in render call`);
   } else {
@@ -795,6 +809,8 @@ function patchSelectionCss(css: string): { patched: string; count: number } {
 //     window reload; entries not written for 30 days are dropped
 // The runtime is prepended to the bundle (a plain script) so it exists before the
 // first render; every call is guarded, a draft must never break the input.
+// 2.1.300 and later keep the text and attachments themselves (session.composerDraft);
+// patchComposerDraft adds the rest on top of that, with the same runtime.
 const DRAFT_RUNTIME = `/* cce-patch: per-session drafts */window.__cceDraft=(()=>{
 var PREFIX="cce-draft:",MAX_AGE=30*864e5,pruned=!1,
 key=function(s){var id=s.sessionId&&s.sessionId.value;return id?PREFIX+(s.isRemote&&s.isRemote.value?"remote:":"")+id:null},
@@ -803,9 +819,10 @@ drop=function(k){try{localStorage.removeItem(k)}catch(e){}},
 prune=function(){if(pruned)return;pruned=!0;try{for(var i=localStorage.length-1;i>=0;i--){
   var k=localStorage.key(i),v=k&&k.indexOf(PREFIX)===0?load(k):0;if(v===null||v&&!(Date.now()-v.t<MAX_AGE))drop(k)}}catch(e){}},
 draft=function(s){if(s.cceDraft)return s.cceDraft;prune();var k=key(s),v=k&&load(k);
+  if(v&&s.composerDraft==="")s.composerDraft=v.text;
   return s.cceDraft={text:v?v.text:"",mentions:v&&Array.isArray(v.mentions)?v.mentions:[],files:[],key:v?k:null}};
 return{
-text:function(s){try{return draft(s).text}catch(e){return""}},
+text:function(s){var d;try{d=draft(s)}catch(e){}try{return typeof s.composerDraft==="string"?s.composerDraft:d?d.text:""}catch(e){return""}},
 mentions:function(s){try{return new Set(draft(s).mentions)}catch(e){return new Set}},
 files:function(s){try{return draft(s).files}catch(e){return[]}},
 saveInput:function(s,text,mentions){try{
@@ -822,7 +839,19 @@ restore:function(el,text){try{
 }})();
 `;
 
+// React's hook exports keep their source shape, `o=function($,J){return Bz.current.useEffect($,J)}`:
+// the alias of hook NAME from the same React (dispatcher) as the given useState alias.
+function reactHook(code: string, name: string, useState: string): string | undefined {
+  const hooks = (hook: string) =>
+    [...code.matchAll(new RegExp(`([\\w$]+)=function\\(([\\w$]+)(?:,([\\w$]+))?\\)\\{return ([\\w$]+)\\.current\\.${hook}\\(\\2(?:,\\3)?\\)\\}`, "g"))]
+      .map((m) => ({ name: m[1], dispatcher: m[4] }));
+  const dispatcher = hooks("useState").find((h) => h.name === useState)?.dispatcher;
+  return dispatcher && hooks(name).find((h) => h.dispatcher === dispatcher)?.name;
+}
+
 function patchDraftPersistence(code: string): { patched: string; count: number } {
+  if (code.includes(".composerDraft")) return patchComposerDraft(code);
+
   // The message input: forwardRef(function({session:S,onSubmit:…},REF){HOOK();let[TEXT,SET]=useState("")…
   const inputs = [...code.matchAll(/\(function\(\{session:([\w$]+),onSubmit:[^)]*?\},[\w$]+\)\{[\w$]+\(\);let\[([\w$]+),[\w$]+\]=([\w$]+)\(""\)/g)];
   const input = inputs.length === 1 ? inputs[0] : undefined;
@@ -835,14 +864,9 @@ function patchDraftPersistence(code: string): { patched: string; count: number }
   const editable = input && code.substring(inputAt, inputAt + 60000).match(/\("div",\{ref:([\w$]+),contentEditable:"plaintext-only"/)?.[1];
   const editableOwn = !!editable && new RegExp(`(?<![\\w$])${escRe(editable)}=[\\w$]+\\(null\\)`).test(inputHead);
 
-  // React's hook exports keep their source shape, `o=function($,J){return Bz.current.useEffect($,J)}`;
-  // take the effects from the same React as the input's useState.
-  const hooks = (name: string) =>
-    [...code.matchAll(new RegExp(`([\\w$]+)=function\\(([\\w$]+)(?:,([\\w$]+))?\\)\\{return ([\\w$]+)\\.current\\.${name}\\(\\2(?:,\\3)?\\)\\}`, "g"))]
-      .map((m) => ({ name: m[1], dispatcher: m[4] }));
-  const dispatcher = hooks("useState").find((h) => h.name === useState)?.dispatcher;
-  const useEffect = dispatcher && hooks("useEffect").find((h) => h.dispatcher === dispatcher)?.name;
-  const useLayoutEffect = dispatcher && hooks("useLayoutEffect").find((h) => h.dispatcher === dispatcher)?.name;
+  // Take the effects from the same React as the input's useState.
+  const useEffect = input && reactHook(code, "useEffect", useState);
+  const useLayoutEffect = input && reactHook(code, "useLayoutEffect", useState);
 
   // The chat view, function CHAT({session:S,context:C,onCreateNewSession:…}){HOOK();…
   // Its attachments are the state it hands the input as `attachedFiles:FILES,onRemoveFile:`.
@@ -906,6 +930,59 @@ function patchDraftPersistence(code: string): { patched: string; count: number }
   return { patched: DRAFT_RUNTIME + patched, count: edits.length + 1 };
 }
 
+// ── Webview JS patches: the rest of the draft, on top of upstream's (2.1.300+) ──
+// 2.1.300 keeps drafts itself: the input starts from `session.composerDraft` (the
+// contentEditable's text is written back when the input unmounts, and the caret goes
+// to the end on its first focus), and the attachments live in the
+// `session.composerAttachments` signal. Two things are still missing:
+//   • the @-mention set starts empty on every mount, so the @-mentions in a kept
+//     draft lose their highlight
+//   • the draft lives in memory only, so a window reload drops it
+// The input seeds its text and @-mentions from the runtime above and saves both on
+// every change. After a reload the runtime puts the stored text into
+// session.composerDraft before the input reads it, so upstream's own restore, caret
+// and typing-activity handling apply to it as to any kept draft.
+function patchComposerDraft(code: string): { patched: string; count: number } {
+  // forwardRef(function({session:S,onSubmit:…},REF){HOOK();let[TEXT,SET]=useState(S.composerDraft)…
+  const inputs = [...code.matchAll(/\(function\(\{session:([\w$]+),onSubmit:[^)]*?\},[\w$]+\)\{[\w$]+\(\);let\[([\w$]+),[\w$]+\]=([\w$]+)\(\1\.composerDraft\)/g)];
+  const input = inputs.length === 1 ? inputs[0] : undefined;
+  const [, s = "", text = "", useState = ""] = input ?? [];
+  const inputAt = input?.index ?? -1;
+  // …and its @-mention set, `[M,SET]=useState(()=>new Set)`, declared at the top of it.
+  const mentions = input && code.substring(inputAt, inputAt + 5000)
+    .match(new RegExp(`\\[([\\w$]+),[\\w$]+\\]=${escRe(useState)}\\(\\(\\)=>new Set\\)`));
+  const useEffect = input && reactHook(code, "useEffect", useState);
+
+  const missing = [
+    !input && (inputs.length > 1 ? "unique message input" : "message input"),
+    input && !mentions && "input @-mention state",
+    input && !useEffect && "useEffect",
+  ].filter(Boolean);
+  if (missing.length > 0 || !input || !mentions || !useEffect) {
+    console.log(`  Could not find the message input (missing: ${missing.join(", ")})`);
+    return { patched: code, count: 0 };
+  }
+
+  const D = "window.__cceDraft";
+  const m = mentions[1];
+  const seed = `(${s}.composerDraft)`;
+  const edits: [at: number, length: number, insert: string][] = [
+    // The text starts from the kept draft, or after a reload from localStorage.
+    [inputAt + input[0].length - seed.length, seed.length, `(()=>${D}.text(${s}))`],
+    // So do the @-mentions; both are saved on every change (and when the session
+    // gets its id).
+    [inputAt + mentions.index!, mentions[0].length,
+      mentions[0].slice(0, -"(()=>new Set)".length) + `(()=>${D}.mentions(${s}))` +
+      `,__cceDraftInput=${useEffect}(()=>{${D}.saveInput(${s},${text},${m})},[${s},${text},${m},${s}.sessionId?.value])`],
+  ];
+  let patched = code;
+  for (const [at, length, str] of edits.sort((a, b) => b[0] - a[0])) {
+    patched = patched.slice(0, at) + str + patched.slice(at + length);
+  }
+  console.log(`  2.1.300+ drafts: @-mentions kept per session, text kept across reloads (input: text ${text}, mentions ${m})`);
+  return { patched: DRAFT_RUNTIME + patched, count: edits.length + 1 };
+}
+
 // ── Webview JS patches: default reasoning effort to max ──
 function patchDefaultEffortMax(code: string): { patched: string; count: number } {
   let patched = code;
@@ -942,21 +1019,25 @@ function patchExtensionEffortMax(code: string): { patched: string; count: number
   let count = 0;
 
   // Find: if(this.options.effort)ARGS.push("--effort",this.options.effort)
-  // Replace with: ARGS.push("--effort",this.options.effort||"max")
+  //   or, 2.1.296+ (flags passed as `--flag=value`):
+  //       if(this.options.effort)ARGS.push(FLAG("--effort",this.options.effort))
+  // Replace with: ARGS.push(…"--effort",this.options.effort||"max"…)
   // This ensures the CLI always receives --effort max unless explicitly overridden.
-  const effortRe = /if\(this\.options\.effort\)([\w$]+)\.push\("--effort",this\.options\.effort\)/;
+  // Nothing else does: the webview's effortLevel default (patchDefaultEffortMax) only
+  // sets what the picker shows until the CLI reports the level it actually runs at.
+  const effortRe = /if\(this\.options\.effort\)(([\w$]+)\.push\((?:[\w$]+\()?"--effort",this\.options\.effort)(?=\))/;
   const effortMatch = patched.match(effortRe);
 
   if (effortMatch) {
-    const argsVar = effortMatch[1];
+    const argsVar = effortMatch[2];
     const original = effortMatch[0];
-    const replacement = `${argsVar}.push("--effort",this.options.effort||"max")`;
-    patched = patched.replace(original, replacement);
+    const replacement = `${effortMatch[1]}||"max"`;
+    patched = patched.replace(original, () => replacement);
     count++;
     console.log(`  Changed conditional --effort to default "max" (args var: ${argsVar})`);
   } else {
     // Check if already patched
-    if (/\.push\("--effort",this\.options\.effort\|\|"max"\)/.test(patched)) {
+    if (/\.push\((?:[\w$]+\()?"--effort",this\.options\.effort\|\|"max"\)/.test(patched)) {
       console.log('  Already patched: --effort defaults to "max"');
     } else {
       console.log("  Could not find --effort push pattern in extension.js");
@@ -1109,6 +1190,8 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   const checks: [string, boolean][] = [
     ["sessions-always-open guard removed", wvJsCode.includes("/*patched:sessions-always-open*/")],
     ["isOpen forced true", /[\w$]+,\{isOpen:!0,onClose:/.test(wvJsCode)],
+    // A list built only while the dropdown is open renders an empty panel (2.1.309).
+    ["sessions list not gated on the dropdown", !/,\{isOpen:!0,onClose:[^]{0,600}?localSessions:[\w$]+\?/.test(wvJsCode)],
     ["status dot injected", wvJsCode.includes("cce-status-dot")],
     ["current file/selection not attached by default", selResult.count > 0],
     ["panel resize handle added", wvJsCode.includes("cce-patch: drag-to-resize the sessions panel")],
@@ -1125,7 +1208,7 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
       `     Each FAIL above needs its patch function's anchors updated for this version\n` +
       `     (sidebar + resize handle: patchWebviewJs, dots: patchSessionStatusDots,\n` +
       `      selection: patchIncludeSelectionDefault / patchSelectionOptIn,\n` +
-      `      drafts: patchDraftPersistence).`
+      `      drafts: patchDraftPersistence / patchComposerDraft).`
     );
   }
 

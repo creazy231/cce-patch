@@ -37,7 +37,7 @@ The "Include Selection" toggle in the chat input defaults to **off** instead of 
 
 ### Drafts Kept Per Session
 
-Start typing in a session, switch to another one, come back — your **text, `@`-mentions and attachments are still there**, with the caret at the end. Works for new and existing sessions alike; sending the message clears the draft. The text of existing sessions also survives a window reload (kept in the webview's local storage for 30 days); attachments are kept for as long as the window is open.
+Start typing in a session, switch to another one, come back — your **text, `@`-mentions and attachments are still there**, with the caret at the end. Works for new and existing sessions alike; sending the message clears the draft. The text of existing sessions also survives a window reload (kept in the webview's local storage for 30 days); attachments are kept for as long as the window is open. Since extension 2.1.300 the extension itself keeps the text and attachments while you switch sessions; the patch adds the `@`-mentions and the reload persistence.
 
 ### Claude Commit Messages
 
@@ -136,7 +136,7 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 
 | File | What Changes |
 |------|-------------|
-| `extension.js` | Enables `sessionsListEnabled` and `primaryEditorEnabled` feature flags |
+| `extension.js` | Enables `sessionsListEnabled` and `primaryEditorEnabled` feature flags, starts the CLI with `--effort max` unless another level is set |
 | `webview/index.js` | Removes dropdown close behavior, injects status dot elements, defaults "Include Selection" to off, keeps each session's draft |
 | `webview/index.css` | Restyles the dropdown as a fixed sidebar panel, adds status dot styles with pulse animations |
 
