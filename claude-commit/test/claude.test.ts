@@ -24,8 +24,20 @@ const success = (result: string) => JSON.stringify({ type: "result", subtype: "s
 test("buildArgs: one-shot, isolated, JSON output", () => {
   expect(buildArgs({ model: "haiku", systemPrompt: "SYS" })).toEqual([
     "-p", "--model", "haiku", "--safe-mode", "--tools", "", "--disable-slash-commands",
-    "--no-session-persistence", "--output-format", "json", "--system-prompt", "SYS",
+    "--no-session-persistence", "--output-format", "json",
+    "--settings", '{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"low","CLAUDE_CODE_DISABLE_THINKING":"1"}}',
+    "--system-prompt", "SYS",
   ]);
+});
+
+test("buildArgs pins low effort and no thinking in --settings, which outranks ~/.claude/settings.json", () => {
+  // The CLI applies `env` from ~/.claude/settings.json even in safe mode, over both the process
+  // env and --effort. With "CLAUDE_CODE_EFFORT_LEVEL": "max" there, Haiku thought for 30-40 s on
+  // a 70 KB diff. Only `env` in --settings ranks above it.
+  const args = buildArgs({ model: "haiku", systemPrompt: "SYS" });
+  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  expect(settings.env).toEqual({ CLAUDE_CODE_EFFORT_LEVEL: "low", CLAUDE_CODE_DISABLE_THINKING: "1" });
+  expect(args).not.toContain("--effort");
 });
 
 test("buildEnv drops nested-session variables, adds the user's, skips non-essential traffic", () => {

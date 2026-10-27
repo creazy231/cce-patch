@@ -42,6 +42,15 @@ function resolveClaudeBinary({ configuredPath, claudeCodeExtensionPath, envPath 
   return candidates.find(isExecutable);
 }
 
+/**
+ * Low effort and no thinking, like Copilot's quick answer. The CLI applies `env` from
+ * ~/.claude/settings.json even in safe mode, over both the process env and --effort, so a
+ * "CLAUDE_CODE_EFFORT_LEVEL": "max" there had Haiku think for 30-40 s on a larger diff; `env` in
+ * --settings ranks above it. Haiku 5.5 thinks adaptively, which only a low effort keeps short.
+ * Older CLIs run Haiku 4.5 with a thinking budget, which only the second variable turns off.
+ */
+const QUICK_ANSWER_ENV = { CLAUDE_CODE_EFFORT_LEVEL: 'low', CLAUDE_CODE_DISABLE_THINKING: '1' };
+
 /** @param {{ model: string, systemPrompt: string }} options */
 function buildArgs({ model, systemPrompt }) {
   return [
@@ -52,6 +61,7 @@ function buildArgs({ model, systemPrompt }) {
     '--disable-slash-commands',
     '--no-session-persistence', // keep these calls out of the session list
     '--output-format', 'json',
+    '--settings', JSON.stringify({ env: QUICK_ANSWER_ENV }),
     '--system-prompt', systemPrompt,
   ];
 }

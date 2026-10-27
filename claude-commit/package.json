@@ -2,7 +2,7 @@
   "name": "claude-commit-message",
   "displayName": "Claude Commit Message",
   "description": "Generate Source Control commit messages with Claude through your Claude Code login, the same way the built-in ✨ button does.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "cce-patch",
   "license": "UNLICENSED",
   "private": true,
