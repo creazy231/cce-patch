@@ -262,13 +262,22 @@ function findApp(editor: Editor): string | undefined {
   return [join("/Applications", editor.app), join(homedir(), "Applications", editor.app)].find((p) => existsSync(p));
 }
 
+/**
+ * The command-line tool from `which` / `where` output. On Windows `where` lists the editor's
+ * extensionless shell script (for WSL and Git Bash) before the .cmd that Windows runs.
+ */
+export function pickCli(found: string): string | undefined {
+  const files = found.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return files.find((file) => /\.(cmd|exe)$/i.test(file)) ?? files[0];
+}
+
 function findCli(editor: Editor, app: string | undefined): string | undefined {
   if (app) {
     const bundled = join(app, "Contents", "Resources", "app", "bin", editor.cli);
     if (existsSync(bundled)) return bundled;
   }
   const which = spawnSync(process.platform === "win32" ? "where" : "which", [editor.pathCli], { encoding: "utf8" });
-  return which.status === 0 ? which.stdout.split(/\r?\n/)[0].trim() || undefined : undefined;
+  return which.status === 0 ? pickCli(which.stdout) : undefined;
 }
 
 function hasClaudeCode(editor: Editor, home: string): boolean {
@@ -283,8 +292,22 @@ export function selectEditors(only: string[] | undefined, home: string): Editor[
     : EDITORS.filter((e) => hasClaudeCode(e, home));
 }
 
-function run(cli: string, args: string[], okIfOutput?: RegExp): void {
-  const result = spawnSync(cli, args, { encoding: "utf8", shell: process.platform === "win32" });
+/**
+ * A cmd.exe command line with every part quoted. With `shell: true`, Node and Bun hand cmd.exe the
+ * parts joined by spaces, unquoted, so the editor's C:\…\Microsoft VS Code\bin\code.cmd broke at
+ * the first space. Paths can't contain `"`. Trailing backslashes are doubled, or the last one
+ * would escape the closing quote.
+ */
+export function windowsCommandLine(command: string, args: string[]): string {
+  return [command, ...args].map((part) => `"${part.replace(/(\\*)$/, "$1$1")}"`).join(" ");
+}
+
+export function run(cli: string, args: string[], okIfOutput?: RegExp): void {
+  // On Windows the CLI is a .cmd, which only runs through cmd.exe (Node refuses to spawn one without a shell).
+  const result =
+    process.platform === "win32"
+      ? spawnSync(windowsCommandLine(cli, args), { encoding: "utf8", shell: true })
+      : spawnSync(cli, args, { encoding: "utf8" });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   if (result.status !== 0 && !(okIfOutput && okIfOutput.test(output))) {
     throw new Error(`${cli} ${args.join(" ")} failed:\n${output || result.error?.message || `exit code ${result.status}`}`);

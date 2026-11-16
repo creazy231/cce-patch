@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -11,8 +11,11 @@ import {
   hasClaudeCodicon,
   isUpToDate,
   parseJsonc,
+  pickCli,
   removeProposedApi,
+  run,
   selectEditors,
+  windowsCommandLine,
   withIcon,
   zip,
 } from "../install.ts";
@@ -165,6 +168,32 @@ describe("selectEditors", () => {
     mkdirSync(join(home, ".cursor", "extensions", "someone.else-1.0.0"), { recursive: true });
     expect(selectEditors(undefined, home).map((e) => e.key)).toEqual(["code"]);
     expect(selectEditors([], home).map((e) => e.key)).toEqual(["code"]);
+  });
+});
+
+describe("the editor's command-line tool", () => {
+  test("pickCli takes the .cmd that Windows' `where` lists after the extensionless shell script", () => {
+    const bin = "C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code Insiders\\bin\\";
+    expect(pickCli(`${bin}code-insiders\r\n${bin}code-insiders.cmd\r\n`)).toBe(`${bin}code-insiders.cmd`);
+    expect(pickCli("/usr/local/bin/code\n")).toBe("/usr/local/bin/code");
+    expect(pickCli("")).toBeUndefined();
+  });
+  test("windowsCommandLine quotes every part, so cmd.exe keeps paths with spaces whole", () => {
+    expect(windowsCommandLine("C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd", ["--install-extension", "C:\\a b & (c)\\x.vsix", "--force"]))
+      .toBe('"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" "--install-extension" "C:\\a b & (c)\\x.vsix" "--force"');
+    // A backslash before the closing quote would escape it: doubled, it stays a backslash.
+    expect(windowsCommandLine("code.cmd", ["C:\\dir\\"])).toBe('"code.cmd" "C:\\dir\\\\"');
+  });
+  // Windows installs it as bin\code.cmd under a folder with spaces (…\Programs\Microsoft VS Code),
+  // and the .cmd hands its arguments to the editor, like this stand-in does.
+  test.skipIf(process.platform !== "win32")("runs a .cmd under a path with spaces and passes paths with spaces whole", () => {
+    const bin = join(dir, "Microsoft VS Code", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "argv.js"), 'require("fs").writeFileSync(__dirname + "/argv.json", JSON.stringify(process.argv.slice(2)));');
+    writeFileSync(join(bin, "code.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0argv.js" %*\r\n`);
+    const args = ["--install-extension", join(dir, "a b & (c)", "x.vsix"), "--force"];
+    run(join(bin, "code.cmd"), args);
+    expect(JSON.parse(readFileSync(join(bin, "argv.json"), "utf8"))).toEqual(args);
   });
 });
 
