@@ -72,7 +72,7 @@ Automatically detects and patches **all installed editors** in a single run:
 
 ## Requirements
 
-- **macOS, Linux, or WSL** (standard VS Code extension paths)
+- **macOS, Linux, Windows, or WSL** (standard VS Code extension paths)
 - **Claude Code extension** installed in at least one supported editor
 - One of the following runtimes:
   - [Bun](https://bun.sh) (recommended — zero config)
