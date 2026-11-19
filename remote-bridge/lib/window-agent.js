@@ -23,6 +23,13 @@
 // Events:
 //   'project' (project)        the window's project, whenever refreshProject() finds it changed
 //   'session' (sessionId, ev)  ev = {t:'msg', message} | {t:'stream', event} | {t:'pending', pending}
+//   'attention' (ev)           the moments a notification is for, whether or not a phone is connected:
+//                              ev = {kind:'waiting', session, requestId, title, prompt:{kind, toolName, text}}
+//                                     (a prompt appeared: once per request id)
+//                                 | {kind:'open', session, requestIds}
+//                                     (the session's live prompts, every time they may have changed)
+//                                 | {kind:'done', session, title, isError, durationMs, text}
+//                                     (a turn ended)
 //
 // Every window of every patched editor runs an agent, so while remote access is off (the coordinator
 // says so: setEnabled) it maps, keeps and emits no session messages at all; it only follows the few
@@ -61,6 +68,14 @@ const { classifyPending, buildAnswer } = require('./answers.js');
  */
 /** @typedef {{ comms: any, channelId: string, channel: any, key: string }} ChannelRef */
 /**
+ * What the `attention` event carries. `title` is the session's, as project() shows it; `text` is one short line
+ * (a prompt's key argument, a result's start), '' when there is none.
+ * @typedef {{ kind: 'waiting', session: string, requestId: string, title: string,
+ *   prompt: { kind: Pending['kind'], toolName: string, text: string } }
+ *   | { kind: 'open', session: string, requestIds: string[] }
+ *   | { kind: 'done', session: string, title: string, isError: boolean, durationMs: number, text: string }} AttentionEvent
+ */
+/**
  * A session of buildSessionList(), cut down to what a project shows.
  * @typedef {{ id: string, archived: boolean, at: number, customTitle?: string, summary?: string,
  *   gitBranch?: string, worktree?: string }} ListEntry
@@ -85,6 +100,8 @@ const AGENT_LIMITS = Object.freeze({
   modeWaitMs: 5_000, // how long an answer waits for its permission mode to be applied
   sessions: 200, // sessions in a project
   title: 200, // characters of a session title
+  attentionText: 140, // characters of the text an attention event carries
+  announced: 1000, // request ids remembered as announced (the attention event `waiting`): a request the host delivers twice is news once
   text: 100_000, // characters of a message from the phone
   images: 4, // images in a message from the phone
   imageChars: 5 * 1024 * 1024, // base64 characters of one image
@@ -190,13 +207,13 @@ function unref(timer) {
 }
 
 /**
- * A title on one line: whitespace runs become one space, and past AGENT_LIMITS.title characters it is
- * cut (never inside a surrogate pair) and ends in an ellipsis. Undefined for no text.
+ * Text on one line: whitespace runs become one space, and past `max` characters (a session title's, by default)
+ * it is cut (never inside a surrogate pair) and ends in an ellipsis. Undefined for no text.
  * @param {unknown} value
+ * @param {number} [max]
  */
-function oneLine(value) {
+function oneLine(value, max = AGENT_LIMITS.title) {
   if (typeof value !== 'string') return undefined;
-  const max = AGENT_LIMITS.title;
   const line = value.slice(0, max * 4).replace(/\s+/g, ' ').trim();
   if (line === '') return undefined;
   if (line.length <= max) return line;
@@ -324,6 +341,49 @@ function trimmedInput(input) {
   return block && block.type === 'tool_use' ? block.input : {};
 }
 
+/** The text an attention event carries: one line of at most AGENT_LIMITS.attentionText characters, '' for none. @param {unknown} value */
+function attentionText(value) {
+  return oneLine(value, AGENT_LIMITS.attentionText) ?? '';
+}
+
+/**
+ * What a prompt is about, as one short line for a notification. A question: its first question. A tool: its key
+ * argument (Bash the command; Edit, Write, Read, MultiEdit and NotebookEdit the file's base name; WebFetch the
+ * URL; WebSearch the query; any other tool its first text field). A plan or a dialog has none. '' when the input
+ * does not have it.
+ * @param {Pending} pending
+ */
+function promptText(pending) {
+  const input = pending.input;
+  if (pending.kind === 'question') {
+    const first = Array.isArray(input.questions) ? input.questions[0] : undefined;
+    return attentionText(isRecord(first) ? first.question : undefined);
+  }
+  if (pending.kind !== 'tool') return '';
+  switch (pending.toolName) {
+    case 'Bash':
+      return attentionText(input.command);
+    case 'WebFetch':
+      return attentionText(input.url);
+    case 'WebSearch':
+      return attentionText(input.query);
+    case 'Edit':
+    case 'Write':
+    case 'Read':
+    case 'MultiEdit':
+    case 'NotebookEdit': {
+      const file = input.file_path ?? input.notebook_path;
+      return attentionText(typeof file === 'string' ? path.basename(file) : undefined);
+    }
+    default:
+      for (const value of Object.values(input)) {
+        const line = attentionText(value);
+        if (line !== '') return line;
+      }
+      return '';
+  }
+}
+
 /** @param {unknown} entry @returns {ListEntry | undefined} */
 function listEntry(entry) {
   if (!isRecord(entry) || !isText(entry.id)) return undefined;
@@ -443,6 +503,8 @@ class WindowAgent extends EventEmitter {
     this._liveKeys = 0;
     /** @type {Map<string, boolean>} sessions whose turn is open (system/init seen, no result yet) */
     this._turns = new Map();
+    /** @type {Set<string>} the last AGENT_LIMITS.announced request ids that an attention event announced, oldest first */
+    this._announced = new Set();
     /** @type {Map<string, number>} sessions shown as "New session": when they were first shown */
     this._firstSeen = new Map();
     /** @type {ListEntry[] | null} the last session list */
@@ -708,6 +770,7 @@ class WindowAgent extends EventEmitter {
     } else if (sdk.type === 'result') {
       this._turns.delete(sessionId);
       this._changed();
+      this._emitDone(sessionId, sdk);
     } else if (sdk.type === 'system' && sdk.subtype === 'session_title_changed') {
       this._changed();
     }
@@ -726,7 +789,10 @@ class WindowAgent extends EventEmitter {
     const channelId = isText(message.channelId) ? message.channelId : '';
     const sessionId = this._sessionOfChannel(comms, channelId);
     this._pending.set(pending.requestId, { pending, phone: { ...pending, input: trimmedInput(pending.input) }, comms, channelId, sessionId, answering: false });
-    if (sessionId) this._emitPending(sessionId);
+    if (sessionId) {
+      this._emitPending(sessionId);
+      this._emitWaiting(sessionId, pending);
+    }
     this._changed();
   }
 
@@ -928,10 +994,12 @@ class WindowAgent extends EventEmitter {
     return out;
   }
 
-  /** @param {string} sessionId */
+  /** The session's live prompts, to the phone (`session` event) and as the ids that are still open (`attention` event). @param {string} sessionId */
   _emitPending(sessionId) {
     if (!this._enabled) return;
-    this._emitSession(sessionId, { t: 'pending', pending: this._pendingFor(sessionId).map((entry) => entry.phone) });
+    const live = this._pendingFor(sessionId);
+    this._emitSession(sessionId, { t: 'pending', pending: live.map((entry) => entry.phone) });
+    this._emitAttention({ kind: 'open', session: sessionId, requestIds: live.map((entry) => entry.pending.requestId) });
   }
 
   /** @param {unknown} requestId */
@@ -1091,6 +1159,17 @@ class WindowAgent extends EventEmitter {
   }
 
   // ---- the project ----------------------------------------------------------------------------------------
+
+  /**
+   * The title an attention event names a session by, as project() shows it: the panel's live title, else the
+   * listed custom title or summary (from the last session list read), else "New session". One line, at most
+   * AGENT_LIMITS.title characters (and the ellipsis).
+   * @param {string} sessionId
+   */
+  _titleOf(sessionId) {
+    const listed = this._listed?.find((entry) => entry.id === sessionId);
+    return this._liveTitle(sessionId, this._context()) ?? listed?.customTitle ?? listed?.summary ?? 'New session';
+  }
 
   /** First 12 hex of sha1(appName + "\n" + folders joined by "\n"): stable across reloads. */
   projectId() {
@@ -1704,6 +1783,49 @@ class WindowAgent extends EventEmitter {
   /** @param {string} sessionId @param {SessionEvent} ev */
   _emitSession(sessionId, ev) {
     if (this._enabled) this._emitSafe('session', sessionId, ev);
+  }
+
+  /** @param {AttentionEvent} ev */
+  _emitAttention(ev) {
+    if (this._enabled) this._emitSafe('attention', ev);
+  }
+
+  /**
+   * A prompt appeared in a session: `waiting`, once per request id (a request the host delivers twice is news
+   * once). Not while remote access is off (the id is not noted then either).
+   * @param {string} sessionId @param {Pending} pending
+   */
+  _emitWaiting(sessionId, pending) {
+    if (!this._enabled || this._announced.has(pending.requestId)) return;
+    this._announced.add(pending.requestId);
+    for (const oldest of this._announced) {
+      if (this._announced.size <= AGENT_LIMITS.announced) break;
+      this._announced.delete(oldest);
+    }
+    this._emitAttention({
+      kind: 'waiting',
+      session: sessionId,
+      requestId: pending.requestId,
+      title: this._titleOf(sessionId),
+      prompt: { kind: pending.kind, toolName: pending.toolName, text: promptText(pending) },
+    });
+  }
+
+  /**
+   * A turn ended: `done`. An error is a result that says so (`is_error`) or whose subtype is anything but
+   * `success`; `text` is the start of the result's own text.
+   * @param {string} sessionId @param {Record<string, any>} sdk  the SDK `result` message
+   */
+  _emitDone(sessionId, sdk) {
+    if (!this._enabled) return;
+    this._emitAttention({
+      kind: 'done',
+      session: sessionId,
+      title: this._titleOf(sessionId),
+      isError: sdk.is_error === true || (typeof sdk.subtype === 'string' && sdk.subtype !== 'success'),
+      durationMs: Number.isFinite(sdk.duration_ms) ? sdk.duration_ms : 0,
+      text: attentionText(sdk.result),
+    });
   }
 
   /** A listener that throws is logged; the message it came with goes on. @param {string} name @param {...unknown} args */

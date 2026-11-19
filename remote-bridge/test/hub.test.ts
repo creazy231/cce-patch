@@ -1,8 +1,9 @@
 // The hub: HTTP routing on 127.0.0.1, the phone protocol (Tailscale identity, pairing, hello with
-// token and Origin, subscriptions, requests), the windows behind it (local ones and peers), and the
-// limits that keep a phone from costing unbounded memory. Phones are Bun WebSocket clients that add
-// the headers `tailscale serve` adds. State lives in a temp CCE_REMOTE_HOME; every hub listens on a
-// free port. The last test runs remote-bridge/test/hub-smoke.js under real Node.
+// token and Origin, subscriptions, requests), the windows behind it (local ones and peers, and the
+// attention events they report for notifications), and the limits that keep a phone from costing
+// unbounded memory. Phones are Bun WebSocket clients that add the headers `tailscale serve` adds.
+// State lives in a temp CCE_REMOTE_HOME; every hub listens on a free port. The last test runs
+// remote-bridge/test/hub-smoke.js under real Node.
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -1875,6 +1876,228 @@ describe("peers", () => {
     link.notify("fly", {});
     link.notify("session", { session: "s1", ev: { t: "msg", message: message("m2") } });
     expect((await nextFrame(phone, "msg")).message.uuid).toBe("m2");
+  });
+});
+
+// ---- attention ----------------------------------------------------------------------------------
+
+// What a window's agent reports for notifications (a prompt appeared, a session's open prompts changed, a turn
+// ended), for whoever listens to the hub (the notifier): `attention` with the window's key, public project id and
+// name, and `window-removed` with the key. It needs no phone, and no phone is told.
+describe("attention", () => {
+  const done = (session = "s1") => ({ kind: "done", session, title: "Fix the flaky test", isError: false, durationMs: 1200, text: "All tests pass." });
+  const waiting = (session = "s1", requestId = "r-1") => ({ kind: "waiting", session, requestId, title: "Fix the flaky test", prompt: { kind: "tool", toolName: "Bash", text: "npm test" } });
+  const open = (session = "s1", requestIds: string[] = ["r-1"]) => ({ kind: "open", session, requestIds });
+
+  /** The hub's `attention` and `window-removed` events, in order. */
+  function listen(hub: any) {
+    const attention: Json[] = [];
+    const removed: string[] = [];
+    hub.on("attention", (event: Json) => attention.push(event));
+    hub.on("window-removed", (key: string) => removed.push(key));
+    return { attention, removed };
+  }
+
+  /** A peer window of the hub: the link, and its project sent. */
+  async function peerWindow(ctx: Ctx, id = "bbbbbbbbbbbb", name = "peer-window") {
+    const link = await connectPeer({ port: ctx.port, secret: ctx.state().secret });
+    closers.push(() => link.close());
+    link.setHandler(() => undefined);
+    link.notify("project", project(id, name));
+    return link;
+  }
+
+  test("a window's attention event is emitted with the window's key, public project id and project name", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const w = fakeWindow(ctx.hub, { key: "w1", id: ID, name: "cce-patch" });
+    const events = [waiting(), open(), done(), open("s1", []), open("s2", ["r-2", "r-3"])];
+    for (const ev of events) w.handle.attention(ev);
+    expect(attention).toEqual(events.map((ev) => ({ key: "w1", project: ID, projectName: "cce-patch", ev })));
+    expect(attention[0].ev).toBe(events[0]); // the window's event as it is, not a copy
+  });
+
+  test("the project is the window's public id (with -2 when another window has the project's id), and follows the window", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const first = fakeWindow(ctx.hub, { key: "w1" });
+    const second = fakeWindow(ctx.hub, { key: "w2" }); // the same project id: phones see it as `<id>-2`
+    second.handle.attention(done());
+    first.handle.attention(done());
+    expect(attention.map((event) => [event.key, event.project])).toEqual([["w2", `${ID}-2`], ["w1", ID]]);
+
+    second.handle.setProject(project("bbbbbbbbbbbb", "other")); // the folders changed: another project
+    second.handle.attention(done());
+    expect(attention.at(-1)).toMatchObject({ key: "w2", project: "bbbbbbbbbbbb", projectName: "other" });
+  });
+
+  test("a project name that is not text is an empty name", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const w = fakeWindow(ctx.hub, { id: null });
+    w.handle.setProject({ ...project(ID), name: 42 });
+    w.handle.attention(done());
+    expect(attention).toEqual([{ key: "w1", project: ID, projectName: "", ev: done() }]);
+  });
+
+  test.each([
+    ["not a record: null", null],
+    ["not a record: a string", "done"],
+    ["not a record: an array", [done()]],
+    ["not a record: a number", 5],
+    ["no kind", { session: "s1" }],
+    ["an unknown kind", { ...done(), kind: "finished" }],
+    ["a kind in another case", { ...done(), kind: "DONE" }],
+    ["an empty kind", { ...done(), kind: "" }],
+    ["no session", { kind: "done" }],
+    ["an empty session", { ...done(), session: "" }],
+    ["a session that is not text", { ...done(), session: 5 }],
+    ["a session of 257 characters", { ...done(), session: "x".repeat(257) }],
+    ["an open event without a session", { kind: "open", requestIds: [] }],
+    ["a waiting event without a request id", { ...waiting(), requestId: undefined }],
+    ["a waiting event with an empty request id", { ...waiting(), requestId: "" }],
+    ["a waiting event with a request id that is not text", { ...waiting(), requestId: 7 }],
+    ["a waiting event with a request id of 257 characters", { ...waiting(), requestId: "r".repeat(257) }],
+  ] as Array<[string, unknown]>)("an event that is %s is dropped", async (_what, ev) => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const w = fakeWindow(ctx.hub);
+    w.handle.attention(ev);
+    expect(attention).toEqual([]);
+    w.handle.attention(done()); // the window still works
+    expect(attention).toHaveLength(1);
+  });
+
+  test("ids of 256 characters are fine, and an open or done event needs no request id", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const w = fakeWindow(ctx.hub);
+    const long = "x".repeat(256);
+    const events = [waiting(long, long), open(long, []), done(long)];
+    for (const ev of events) w.handle.attention(ev);
+    expect(attention.map((event) => event.ev)).toEqual(events);
+  });
+
+  test("a window without a project yet, or whose project has no usable id, is no source of events", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const w = fakeWindow(ctx.hub, { id: null });
+    w.handle.attention(done());
+    w.handle.setProject({ name: "no id" }); // refused: ignored with a warning
+    w.handle.attention(done());
+    expect(attention).toEqual([]);
+    w.handle.setProject(project(ID));
+    w.handle.attention(done());
+    expect(attention).toHaveLength(1);
+  });
+
+  test("a removed window, a replaced one, and the windows of a closed hub are no source of events", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const gone = fakeWindow(ctx.hub, { key: "w1" });
+    gone.handle.remove();
+    gone.handle.attention(done());
+    const old = fakeWindow(ctx.hub, { key: "w2", id: "bbbbbbbbbbbb" });
+    const replacement = fakeWindow(ctx.hub, { key: "w2", id: "cccccccccccc" }); // the same key: replaces the first
+    old.handle.attention(done());
+    expect(attention).toEqual([]);
+    replacement.handle.attention(done());
+    expect(attention).toHaveLength(1);
+
+    await ctx.hub.close();
+    replacement.handle.attention(done());
+    fakeWindow(ctx.hub, { key: "w3" }).handle.attention(done()); // a window added to a closed hub never was
+    expect(attention).toHaveLength(1);
+  });
+
+  test("a window's removal is announced with its key, once, whether or not it sent a project", async () => {
+    const ctx = await startHub();
+    const { removed } = listen(ctx.hub);
+    const w1 = fakeWindow(ctx.hub, { key: "w1" });
+    fakeWindow(ctx.hub, { key: "w2", id: "bbbbbbbbbbbb" });
+    w1.handle.remove();
+    w1.handle.remove();
+    expect(removed).toEqual(["w1"]);
+    fakeWindow(ctx.hub, { key: "w3", id: null }).handle.remove();
+    expect(removed).toEqual(["w1", "w3"]);
+  });
+
+  test("a second window with the same key replaces the first, which is announced as removed; close() announces every window", async () => {
+    const ctx = await startHub();
+    const { removed } = listen(ctx.hub);
+    fakeWindow(ctx.hub, { key: "w1" });
+    fakeWindow(ctx.hub, { key: "w1", id: "bbbbbbbbbbbb" });
+    expect(removed).toEqual(["w1"]);
+    fakeWindow(ctx.hub, { key: "w2", id: "cccccccccccc" });
+    await ctx.hub.close();
+    expect(removed.slice(1).sort()).toEqual(["w1", "w2"]);
+    expect(removed).toHaveLength(3);
+    fakeWindow(ctx.hub, { key: "w4" }).handle.remove(); // a window the closed hub never took
+    expect(removed).toHaveLength(3);
+  });
+
+  test("a peer's attention events reach the same path, under the peer window's public id; its closing is announced with its key", async () => {
+    const ctx = await startHub();
+    const { attention, removed } = listen(ctx.hub);
+    const link = await peerWindow(ctx);
+    const events = [waiting(), open(), done()];
+    for (const ev of events) link.notify("attention", ev);
+    await waitFor(() => attention.length === 3, "the peer's events");
+    expect(attention.map((event) => [event.project, event.projectName, event.ev])).toEqual(events.map((ev) => ["bbbbbbbbbbbb", "peer-window", ev]));
+    const key = attention[0].key;
+    expect(key).toEqual(expect.any(String));
+    expect(new Set(attention.map((event) => event.key)).size).toBe(1);
+    expect(removed).toEqual([]);
+    link.close();
+    await waitFor(() => removed.length === 1, "the peer's window to be removed");
+    expect(removed).toEqual([key]);
+  });
+
+  test("a peer's attention event that is not well formed, or comes before the peer's project, is ignored", async () => {
+    const ctx = await startHub();
+    const { attention } = listen(ctx.hub);
+    const link = await connectPeer({ port: ctx.port, secret: ctx.state().secret });
+    closers.push(() => link.close());
+    link.setHandler(() => undefined);
+    link.notify("attention", done()); // before its project
+    link.notify("project", project("bbbbbbbbbbbb", "peer-window"));
+    for (const nonsense of [null, "done", [done()], { kind: "fly", session: "s1" }, { ...done(), session: 5 }, { ...waiting(), requestId: "" }]) link.notify("attention", nonsense);
+    link.notify("attention", done("s-last"));
+    await waitFor(() => attention.length >= 1, "the peer's valid event");
+    expect(attention).toEqual([{ key: expect.any(String), project: "bbbbbbbbbbbb", projectName: "peer-window", ev: done("s-last") }]);
+    expect(ctx.logs.filter((line) => line.startsWith("error"))).toEqual([]); // nothing failed: it was only not an event
+  });
+
+  test("a listener that throws is logged, and reaches neither the window nor the peer link", async () => {
+    const ctx = await startHub();
+    ctx.hub.on("attention", () => {
+      throw new Error("listener broke");
+    });
+    ctx.hub.on("window-removed", () => {
+      throw new Error("listener broke too");
+    });
+    const w = fakeWindow(ctx.hub, { key: "w1" });
+    expect(() => w.handle.attention(done())).not.toThrow();
+    expect(ctx.logs).toContain("error a listener of 'attention' failed: listener broke");
+    const link = await peerWindow(ctx);
+    link.notify("attention", done());
+    await waitFor(() => ctx.logs.filter((line) => line === "error a listener of 'attention' failed: listener broke").length === 2, "the peer event's failure to be logged");
+    expect(ctx.logs.some((line) => line.includes("a peer event failed"))).toBe(false); // the hub took it: the peer link never saw it
+    expect(() => w.handle.remove()).not.toThrow();
+    expect(ctx.logs).toContain("error a listener of 'window-removed' failed: listener broke too");
+    link.notify("attention", done("s2")); // the link carries on
+    await waitFor(() => ctx.logs.filter((line) => line === "error a listener of 'attention' failed: listener broke").length === 3, "the next peer event");
+  });
+
+  test("attention events are no phone frames: a phone that watches the session hears nothing of them", async () => {
+    const ctx = await startHub();
+    const w = fakeWindow(ctx.hub);
+    const { phone } = await pairedPhone(ctx);
+    phone.send({ t: "sub", project: ID, session: "s1" });
+    await nextFrame(phone, "snapshot");
+    for (const ev of [waiting(), open(), done()]) w.handle.attention(ev);
+    await roundTrip(phone);
+    await phone.expectQuiet();
   });
 });
 

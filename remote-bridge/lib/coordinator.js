@@ -16,7 +16,9 @@
 // The window joins the hub through its WindowAgent: the hub calls the agent (snapshot, send, answer,
 // interrupt, open, openClaude, active), and the agent's project and session events go to the hub.
 // A peer passes session events on only while a phone is connected (the hub's `active`), so the
-// stream of an unwatched session does not cross the link.
+// stream of an unwatched session does not cross the link. The agent's attention events (a prompt
+// appeared, a turn ended: what a notification is for) go to the hub at all times, since they matter
+// exactly when no phone is looking.
 //
 // It also answers the Connection tab (connection-ui.js): status(), connect(), disconnect(), and the
 // hub's business (a pairing code, a device's removal, the app's address), which a peer asks the hub
@@ -79,7 +81,7 @@ const CONSENT_URL_RE = /^https:\/\/login\.tailscale\.com\//;
  * @typedef {{ enabled: boolean, role: Role, error?: string, port: number, url?: string, macName: string,
  *   tailscale: TailscaleView, serve: { configured: boolean }, windows: number, devices: DeviceView[],
  *   pairing?: PairingView, appUrl: string }} ConnectionStatus
- * @typedef {{ project(project: object): void, session(sessionId: string, ev: object): void, dispose(): void }} Sink
+ * @typedef {{ project(project: object): void, session(sessionId: string, ev: object): void, attention(ev: object): void, dispose(): void }} Sink
  */
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
@@ -1005,6 +1007,7 @@ class Coordinator extends EventEmitter {
     this._bind(gen, {
       project: (project) => window.setProject(project),
       session: (sessionId, ev) => window.sessionEvent(sessionId, ev),
+      attention: (ev) => window.attention(ev),
       dispose: () => window.remove(),
     });
     this._setRole('hub');
@@ -1038,6 +1041,7 @@ class Coordinator extends EventEmitter {
       session: (sessionId, ev) => {
         if (active) link.notify('session', { session: sessionId, ev });
       },
+      attention: (ev) => link.notify('attention', ev), // always: it is for when no phone is connected
       dispose: () => {},
     });
     this._setRole('peer');
@@ -1150,9 +1154,9 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Passes the agent's project and session events to the hub. The project goes at once (the agent
-   * emits one only when it changes, and may have sent this one to an earlier hub), then again once
-   * the session list is read.
+   * Passes the agent's project, session and attention events to the hub. The project goes at once (the
+   * agent emits one only when it changes, and may have sent this one to an earlier hub), then again
+   * once the session list is read.
    * @param {number} gen
    * @param {Sink} sink
    */
@@ -1181,12 +1185,22 @@ class Coordinator extends EventEmitter {
         this._quiet(error);
       }
     };
+    /** @param {object} ev */
+    const onAttention = (ev) => {
+      try {
+        sink.attention(ev);
+      } catch (error) {
+        this._quiet(error);
+      }
+    };
     agent.on('project', onProject);
     agent.on('session', onSession);
+    agent.on('attention', onAttention);
     const binding = {
       dispose: () => {
         agent.off('project', onProject);
         agent.off('session', onSession);
+        agent.off('attention', onAttention);
         sink.dispose();
       },
     };

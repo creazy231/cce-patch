@@ -326,15 +326,20 @@ function actionCall(frame) {
  *   pendingBytes: number,
  *   lastProjects: string,
  * }} Phone
- * @typedef {{ setProject(project: unknown): void, sessionEvent(sessionId: unknown, ev: unknown): void, remove(): void }} WindowHandle
+ * @typedef {{ setProject(project: unknown): void, sessionEvent(sessionId: unknown, ev: unknown): void, attention(ev: unknown): void, remove(): void }} WindowHandle
  * @typedef {{ code: string, expiresAt: number, link: string, qr: { size: number, path: string } | null }} PairingView
  *   code as XXXX-XXXX; link and qr are empty while the Mac's Tailscale DNS name is unknown
  */
 
 /**
  * The hub. Events: `change` (no arguments) whenever something the Connection tab shows changed
- * (windows, phones, devices, the pairing code, the Mac's address); `close` once, when close() has
- * finished and the port is free. It never emits `error`.
+ * (windows, phones, devices, the pairing code, the Mac's address); `attention` ({key, project,
+ * projectName, ev}) for each attention event of a window that has a project (a prompt appeared, a
+ * session's open prompts changed, a turn ended: what a notification is for; no phone needs to be
+ * connected, and none is told), with the window's key, the project's public id and its name;
+ * `window-removed` (key) when a window is gone; `close` once, when close() has finished and the port
+ * is free. It never emits `error`; a listener that throws is logged and is not heard of by whoever
+ * caused the event.
  */
 class Hub extends EventEmitter {
   /**
@@ -517,7 +522,8 @@ class Hub extends EventEmitter {
    * sent a project; the hub lists it under the project's own id, or that id with -2, -3 … when another
    * window has it. A window that sends a project with another id (its folders changed) is listed
    * under the new one, and the old id is gone for the phones. A second window with the same `key`
-   * replaces the first.
+   * replaces the first. The handle's `attention(ev)` takes the window's attention events (see
+   * _attention), once it has a project.
    * @param {{ key?: string, call: (method: string, args: any) => any }} options
    * @returns {WindowHandle}
    */
@@ -536,6 +542,7 @@ class Hub extends EventEmitter {
     return {
       setProject: (project) => this._setProject(win, project),
       sessionEvent: (sessionId, ev) => this._sessionEvent(win, sessionId, ev),
+      attention: (ev) => this._attention(win, ev),
       remove: () => this._removeWindow(win),
     };
   }
@@ -543,8 +550,9 @@ class Hub extends EventEmitter {
   /**
    * Registers the window behind a peer link (another VS Code window's bridge) and answers its calls
    * to the hub: `status` → info(), `newPairingCode` → newPairingCode(), `removeDevice {id}`,
-   * `setAppUrl {url}`. The peer sends `project` (its Project) and `session` ({session, ev}) events.
-   * The window goes when the link closes. Only for a link whose peer proved itself (its `auth`).
+   * `setAppUrl {url}`. The peer sends `project` (its Project), `session` ({session, ev}) and
+   * `attention` (an attention event) events. The window goes when the link closes. Only for a link
+   * whose peer proved itself (its `auth`).
    * @param {import('./peer-link.js').PeerLink} link
    */
   attachPeer(link) {
@@ -554,6 +562,7 @@ class Hub extends EventEmitter {
       try {
         if (name === 'project') window.setProject(data);
         else if (name === 'session' && isRecord(data)) window.sessionEvent(data.session, data.ev);
+        else if (name === 'attention') window.attention(data);
       } catch (error) {
         this._log(`a peer event failed: ${errorText(error)}`, 'error');
       }
@@ -636,6 +645,7 @@ class Hub extends EventEmitter {
     if (win.publicId !== '' && this._byPublicId.get(win.publicId) === win) this._byPublicId.delete(win.publicId);
     if (win.project) this._projectsChanged();
     this._emitChange();
+    this._emitSafe('window-removed', win.key);
   }
 
   /**
@@ -721,6 +731,24 @@ class Hub extends EventEmitter {
       if (pending) this._holdBack(phone, pending, line);
       else this._sendText(phone, line);
     }
+  }
+
+  /**
+   * A window's attention event, for whoever listens to the hub: `attention` with the window's key, its
+   * project's public id and name, and the event as the window sent it. Dropped for a window that is gone
+   * or has no project yet, and when it is not an event: a record whose `kind` is `waiting`, `open` or
+   * `done`, with a `session` id, and for `waiting` a `requestId`. Nothing goes to the phones.
+   * @param {Window} win @param {unknown} ev
+   */
+  _attention(win, ev) {
+    if (win.removed || win.project === null || win.publicId === '') return;
+    if (!isRecord(ev) || !isId(ev.session)) return;
+    if (ev.kind === 'waiting') {
+      if (!isId(ev.requestId)) return;
+    } else if (ev.kind !== 'open' && ev.kind !== 'done') {
+      return;
+    }
+    this._emitSafe('attention', { key: win.key, project: win.publicId, projectName: text(win.project.name), ev });
   }
 
   _projectsChanged() {
@@ -1482,6 +1510,15 @@ class Hub extends EventEmitter {
       this.emit('change');
     } catch (error) {
       this._log(`a change listener failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  /** Emits an event for the hub's listeners; one that throws is logged. @param {string} name @param {...unknown} args */
+  _emitSafe(name, ...args) {
+    try {
+      this.emit(name, ...args);
+    } catch (error) {
+      this._log(`a listener of '${name}' failed: ${errorText(error)}`, 'error');
     }
   }
 

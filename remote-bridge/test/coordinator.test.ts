@@ -1158,6 +1158,26 @@ describe("a peer window", () => {
     expect(link.events.length).toBe(before);
   });
 
+  test("attention events cross the link at once, whether or not phones are connected; session events wait for a phone", async () => {
+    const { link, comms, agent } = await peerOf();
+    await until("the project event", () => link.events.find(([name]: [string]) => name === "project")?.[1]);
+    const first = { kind: "waiting", session: "s1", requestId: "r-1", title: "Fix the flaky test", prompt: { kind: "tool", toolName: "Bash", text: "npm test" } };
+    comms.emit("c1", assistant("a-1", "not watched")); // no phone: this stays home
+    agent.emit("attention", first);
+    await until("the attention event", () => link.events.some(([name]: [string]) => name === "attention"));
+    expect(link.events.filter(([name]: [string]) => name === "attention")).toEqual([["attention", first]]);
+    expect(link.events.filter(([name]: [string]) => name === "session")).toEqual([]);
+
+    await link.call("active", { on: true });
+    const second = { kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 1200, text: "All tests pass." };
+    agent.emit("attention", second);
+    await until("the second attention event", () => link.events.filter(([name]: [string]) => name === "attention").length === 2);
+    await link.call("active", { on: false });
+    agent.emit("attention", { kind: "open", session: "s1", requestIds: [] });
+    await until("the third attention event", () => link.events.filter(([name]: [string]) => name === "attention").length === 3);
+    expect(link.events.filter(([name]: [string]) => name === "attention").map(([, ev]: [string, any]) => ev.kind)).toEqual(["waiting", "done", "open"]);
+  });
+
   test("the hub goes away mid-call: the peer's own calls fail fast, and it looks for a hub again", async () => {
     const { coordinator, link, server } = await peerOf({ retryMs: [30, 60], callTimeoutMs: 2000 });
     link.setHandler(() => new Promise(() => {})); // a hub that never answers
@@ -1256,5 +1276,112 @@ describe("with a phone", () => {
     await p.closed; // the hub window follows through the state file
     expect(p.frames.filter((frame) => frame.t === "error")).toEqual([{ t: "error", code: "disabled", message: expect.any(String) }]);
     expect(a.coordinator.role).toBe("off");
+  });
+});
+
+// ---- attention: what a notification is for, from every window to the hub ---------------------------------------
+
+describe("attention", () => {
+  /** A hub window (a) and a peer window (b) on one hub, and the hub's `attention` events. */
+  async function windows(options: Record<string, any> = {}) {
+    const hubs: Hub[] = [];
+    const createHub = (hubOptions: any) => {
+      const hub = new Hub(hubOptions);
+      hubs.push(hub);
+      return hub;
+    };
+    const pair = await hubAndPeer({ createHub, ...options });
+    const seen: any[] = [];
+    hubs[0].on("attention", (event: any) => seen.push(event));
+    return { ...pair, hubs, seen };
+  }
+
+  const done = (title: string) => ({ kind: "done", session: "s1", title, isError: false, durationMs: 1200, text: "All tests pass." });
+  const projectAndKey = (event: any) => [event.project, event.projectName, typeof event.key];
+
+  test("attention reaches the hub from its own window and from a peer, with no phone connected", async () => {
+    const { a, b, hubs, seen } = await windows();
+    expect(hubs[0].phoneCount()).toBe(0);
+    expect(hubs[0].peerCount()).toBe(1);
+
+    const own = done("hub window");
+    a.agent.emit("attention", own);
+    expect(seen).toEqual([{ key: expect.any(String), project: a.agent.projectId(), projectName: "a", ev: own }]);
+
+    const peers = done("peer window");
+    b.agent.emit("attention", peers);
+    await until("the peer's event", () => seen.length === 2);
+    expect(seen[1]).toEqual({ key: expect.any(String), project: b.agent.projectId(), projectName: "b", ev: peers });
+    expect(seen[1].key).not.toBe(seen[0].key); // each window under a key of its own
+    expect(hubs[0].phoneCount()).toBe(0);
+  });
+
+  test("a prompt and a finished turn in a window reach the hub as open, waiting and done, in order", async () => {
+    const { a, b, seen } = await windows();
+    for (const [window, name] of [[a, "a"], [b, "b"]] as const) {
+      seen.length = 0;
+      const asked = window.comms.requestPermission("c1", bash);
+      window.comms.emit("c1", { type: "result", subtype: "success", is_error: false, duration_ms: 5, result: "ok", session_id: "s1", uuid: `r-${name}` });
+      await until(`the events of window ${name}`, () => seen.length === 3);
+      expect(seen.map((event) => event.ev.kind)).toEqual(["open", "waiting", "done"]);
+      expect(seen.map(projectAndKey)).toEqual(Array(3).fill([window.agent.projectId(), name, "string"]));
+      expect(seen[0].ev).toEqual({ kind: "open", session: "s1", requestIds: [asked.requestId] });
+      expect(seen[1].ev).toMatchObject({ kind: "waiting", session: "s1", requestId: asked.requestId, title: expect.any(String), prompt: { kind: "tool", toolName: "Bash", text: "npm test" } });
+      expect(seen[2].ev).toMatchObject({ kind: "done", session: "s1", isError: false, durationMs: 5, text: "ok" });
+    }
+  });
+
+  test("the window listens to its agent's attention events only while it serves or has joined a hub", async () => {
+    const { a, b } = await windows();
+    expect(a.agent.listenerCount("attention")).toBe(1);
+    expect(b.agent.listenerCount("attention")).toBe(1);
+    await b.coordinator.stop();
+    expect(b.agent.listenerCount("attention")).toBe(0);
+    await a.coordinator.stop();
+    expect(a.agent.listenerCount("attention")).toBe(0);
+    expect(a.agent.listenerCount("project")).toBe(0); // as the others
+    expect(a.agent.listenerCount("session")).toBe(0);
+  });
+
+  test("a peer that takes over as the hub passes its attention events to its own hub, and once only", async () => {
+    const { a, b, hubs } = await windows({ retryMs: [30, 60] });
+    await a.coordinator.stop();
+    await until("the peer to take over", () => b.coordinator.role === "hub", 2500);
+    expect(b.agent.listenerCount("attention")).toBe(1);
+    const seen: any[] = [];
+    hubs.at(-1)!.on("attention", (event: any) => seen.push(event));
+    expect(hubs.at(-1)).not.toBe(hubs[0]);
+    const ev = done("after the takeover");
+    b.agent.emit("attention", ev);
+    expect(seen).toEqual([{ key: expect.any(String), project: b.agent.projectId(), projectName: "b", ev }]);
+  });
+
+  test("a hub that throws on an attention event is logged, and the window goes on", async () => {
+    let failed = 0;
+    const hubs: Hub[] = [];
+    const createHub = (options: any) => {
+      const hub = new Hub(options);
+      hubs.push(hub);
+      const add = hub.addWindow.bind(hub);
+      hub.addWindow = (window: any) => {
+        const handle = add(window);
+        return {
+          ...handle,
+          attention: (ev: unknown) => {
+            if (failed++ === 0) throw new Error("hub refused");
+            handle.attention(ev);
+          },
+        };
+      };
+      return hub;
+    };
+    const { a } = await hubAndPeer({ createHub });
+    const seen: any[] = [];
+    hubs[0].on("attention", (event: any) => seen.push(event));
+    expect(() => a.agent.emit("attention", done("lost"))).not.toThrow();
+    expect(a.logs).toContain("warn: coordinator: hub refused");
+    a.agent.emit("attention", done("kept"));
+    expect(seen.map((event) => event.ev.title)).toEqual(["kept"]);
+    expect(a.agent.listenerCount("attention")).toBe(1);
   });
 });

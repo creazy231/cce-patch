@@ -146,10 +146,12 @@ function windowWith(options: Options = {}) {
   });
   const events: Array<[string, any]> = [];
   const projects: any[] = [];
+  const attention: any[] = [];
   agent.on("session", (session: string, ev: any) => events.push([session, ev]));
   agent.on("project", (project: any) => projects.push(project));
+  agent.on("attention", (ev: any) => attention.push(ev));
   agent.start();
-  return { vscode, provider, sidebar, tab, agent, events, projects, logs };
+  return { vscode, provider, sidebar, tab, agent, events, projects, attention, logs };
 }
 
 // claude-vscode.editor.open(sessionId, initialPrompt, viewColumn, groupId, fullEditor, options). The extension takes
@@ -801,6 +803,289 @@ describe("answer", () => {
     expect(await asked).toEqual(vscodeAnswer);
     expect(sidebar.received.filter((m) => m.type === "response")).toEqual([{ type: "response", requestId: asked.requestId, response: vscodeAnswer }]);
     expect(sidebar.sent.filter((m) => m.type === "cancel_request")).toEqual([]);
+  });
+});
+
+// ---- attention -----------------------------------------------------------------------------------------
+
+// What a notification is for: a prompt appears (`waiting`), a session's open prompts change (`open`), a turn ends
+// (`done`). Emitted like the session events, only while remote access is on, but whether or not a phone is connected.
+describe("attention", () => {
+  /** The window of the brief with its session list read, so that the titles are the listed ones. */
+  async function listedWindow(options?: Options) {
+    const window = windowWith(options);
+    await window.agent.refreshProject();
+    return window;
+  }
+  const waitings = (attention: any[]) => attention.filter((ev) => ev.kind === "waiting");
+  const opens = (attention: any[]) => attention.filter((ev) => ev.kind === "open");
+  const question = {
+    ...bash,
+    toolName: "AskUserQuestion",
+    inputs: {
+      questions: [
+        { question: "Which package\n manager?", header: "Manager", multiSelect: false, options: [{ label: "pnpm", description: "Fast" }] },
+        { question: "Which checks?", header: "Checks", multiSelect: true, options: [] },
+      ],
+    },
+  };
+
+  test("a prompt emits waiting once, with its text", async () => {
+    const { sidebar, attention } = await listedWindow();
+    const cases: Array<[string, Record<string, any>, { kind: string; toolName: string; text: string }]> = [
+      ["a Bash permission", { ...bash, inputs: { command: "npm  test", description: "Run tests" } }, { kind: "tool", toolName: "Bash", text: "npm test" }],
+      ["a question", question, { kind: "question", toolName: "AskUserQuestion", text: "Which package manager?" }],
+      ["an Edit", { ...edit, inputs: { file_path: "/x/y/file.ts", old_string: "a", new_string: "b" } }, { kind: "tool", toolName: "Edit", text: "file.ts" }],
+      ["a plan", plan, { kind: "plan", toolName: "ExitPlanMode", text: "" }],
+      ["a dialog", dialog, { kind: "dialog", toolName: "auto_mode_server_fallback", text: "" }],
+    ];
+    for (const [what, request, prompt] of cases) {
+      attention.length = 0;
+      const asked = sidebar.requestPermission("c1", request);
+      expect(waitings(attention), what).toEqual([{ kind: "waiting", session: "s1", requestId: asked.requestId, title: "Fix the flaky test", prompt }]);
+      // The host delivering the very same request again is not news.
+      sidebar.send({ type: "request", channelId: "c1", requestId: asked.requestId, request });
+      expect(waitings(attention), `${what}, delivered again`).toHaveLength(1);
+    }
+  });
+
+  test("answering or losing the channel reports the open prompts", async () => {
+    const { agent, sidebar, attention } = await listedWindow();
+    const asked = sidebar.requestPermission("c1", bash);
+    expect(opens(attention)).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+
+    await agent.answer("s1", asked.requestId, { kind: "allow" }); // from the phone
+    expect(opens(attention).at(-1)).toEqual({ kind: "open", session: "s1", requestIds: [] });
+
+    const next = sidebar.requestPermission("c1", edit);
+    expect(opens(attention).at(-1)).toEqual({ kind: "open", session: "s1", requestIds: [next.requestId] });
+    sidebar.closeChannel("c1");
+    expect(opens(attention).at(-1)).toEqual({ kind: "open", session: "s1", requestIds: [] });
+  });
+
+  test("every way a prompt goes away reports the prompts that remain, session by session", async () => {
+    const { agent, provider, sidebar, tab, attention } = await listedWindow();
+    const openIds = (session: string) => opens(attention).filter((ev) => ev.session === session).at(-1)?.requestIds;
+    const one = sidebar.requestPermission("c1", bash);
+    const two = sidebar.requestPermission("c1", edit);
+    const other = tab.requestPermission("c2", bash);
+    expect(openIds("s1")).toEqual([one.requestId, two.requestId]);
+    expect(openIds("s2")).toEqual([other.requestId]);
+
+    await sidebar.fromClient({ type: "response", requestId: one.requestId, response: allowBash }); // VS Code answers
+    expect(openIds("s1")).toEqual([two.requestId]);
+    sidebar.send({ type: "cancel_request", targetRequestId: two.requestId }); // the CLI withdraws it
+    expect(openIds("s1")).toEqual([]);
+    expect(openIds("s2")).toEqual([other.requestId]); // the other session is untouched
+
+    sidebar.requestPermission("c1", bash);
+    sidebar.channels.delete("c1"); // the host closed it without a word: the next sweep finds out
+    await agent.refreshProject();
+    expect(openIds("s1")).toEqual([]);
+
+    provider.allComms.delete(tab); // a closed editor tab takes its prompts with it
+    expect(openIds("s2")).toEqual([]);
+  });
+
+  test("a result emits done", async () => {
+    const { agent, sidebar, tab, attention } = await listedWindow();
+    sidebar.emit("c1", init("s1"));
+    expect(attention).toEqual([]); // a turn starting is no news
+    sidebar.emit("c1", { ...result("s1"), result: "All tests pass.\n\nDetails…", duration_ms: 1234 });
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 1234, text: "All tests pass. Details…" }]);
+
+    attention.length = 0;
+    sidebar.emit("c1", { type: "result", subtype: "error_during_execution", is_error: true, duration_ms: 7, errors: [], session_id: "s1", uuid: "r-err" });
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: true, durationMs: 7, text: "" }]);
+
+    attention.length = 0;
+    tab.emit("c2", result("s2")); // another session of the window
+    expect(attention).toEqual([{ kind: "done", session: "s2", title: "Add dark mode", isError: false, durationMs: 1200, text: "done" }]);
+    // the turn the phone starts ends in a done, too (the fake CLI answers with Echo: <prompt>)
+    attention.length = 0;
+    await agent.send("s1", "hello");
+    await sidebar.flush();
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 1, text: "Echo: hello" }]);
+  });
+
+  test("stopping a turn from the phone ends it with an error result: done with isError", async () => {
+    const { agent, sidebar, attention } = await listedWindow();
+    sidebar.emit("c1", init("s1"));
+    await agent.interrupt("s1");
+    await sidebar.flush();
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: true, durationMs: 1, text: "" }]);
+  });
+
+  test.each([
+    ["a successful turn", { subtype: "success", is_error: false, duration_ms: 1200, result: "done" }, { isError: false, durationMs: 1200, text: "done" }],
+    ["is_error on a success (an API failure)", { subtype: "success", is_error: true, result: "Credit balance is too low" }, { isError: true, durationMs: 0, text: "Credit balance is too low" }],
+    ["an error subtype without is_error", { subtype: "error_max_turns", is_error: false, duration_ms: 5 }, { isError: true, durationMs: 5, text: "" }],
+    ["an is_error that is not the boolean true", { subtype: "success", is_error: "yes" }, { isError: false, durationMs: 0, text: "" }],
+    ["neither a subtype nor is_error", {}, { isError: false, durationMs: 0, text: "" }],
+    ["a subtype that is not text", { subtype: 5 }, { isError: false, durationMs: 0, text: "" }],
+    ["a duration that is not a number", { subtype: "success", duration_ms: "slow" }, { isError: false, durationMs: 0, text: "" }],
+    ["a duration that is a number in a string", { subtype: "success", duration_ms: "1500" }, { isError: false, durationMs: 0, text: "" }],
+    ["a duration that is not finite", { subtype: "success", duration_ms: Infinity }, { isError: false, durationMs: 0, text: "" }],
+    ["a result that is not text", { subtype: "success", result: { a: 1 } }, { isError: false, durationMs: 0, text: "" }],
+    ["a blank result", { subtype: "success", result: "  \n\t " }, { isError: false, durationMs: 0, text: "" }],
+  ])("done for %s", async (_what, fields, expected) => {
+    const { sidebar, attention } = await listedWindow();
+    sidebar.emit("c1", { type: "result", session_id: "s1", uuid: "r-x", ...fields });
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", ...expected }]);
+  });
+
+  test("a result that names no session is the channel's; one on a channel without a session is nobody's", async () => {
+    const { sidebar, attention } = await listedWindow();
+    sidebar.emit("c1", { type: "result", subtype: "success", uuid: "r-1", result: "fine" }); // no session_id: the channel's
+    expect(attention).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 0, text: "fine" }]);
+    attention.length = 0;
+    sidebar.openChannel("c7"); // a new session has no id before its system/init
+    sidebar.emit("c7", { type: "result", subtype: "success", uuid: "r-2" });
+    expect(attention).toEqual([]);
+  });
+
+  test("a prompt on a channel that has no session yet is not announced", () => {
+    const { sidebar, attention } = windowWith();
+    sidebar.openChannel("c7");
+    sidebar.requestPermission("c7", bash);
+    expect(attention).toEqual([]);
+  });
+
+  test("nothing while remote access is off", async () => {
+    const { agent, sidebar, tab, attention } = await listedWindow();
+    agent.setEnabled(false);
+    const asked = sidebar.requestPermission("c1", bash);
+    sidebar.send({ type: "request", channelId: "c1", requestId: asked.requestId, request: bash }); // delivered again
+    sidebar.emit("c1", init("s1"));
+    sidebar.emit("c1", result("s1"));
+    sidebar.emit("c1", { type: "result", subtype: "error_during_execution", is_error: true, session_id: "s1", uuid: "r-err" });
+    await sidebar.fromClient({ type: "response", requestId: asked.requestId, response: allowBash }); // an answer reports no open prompts either
+    sidebar.requestPermission("c1", edit);
+    sidebar.closeChannel("c1");
+    await agent.refreshProject();
+    expect(attention).toEqual([]);
+
+    agent.setEnabled(true); // and the events are back
+    const next = tab.requestPermission("c2", bash);
+    tab.emit("c2", result("s2"));
+    expect(attention.map((ev) => ev.kind)).toEqual(["open", "waiting", "done"]);
+    expect(attention[1]).toMatchObject({ session: "s2", requestId: next.requestId, title: "Add dark mode" });
+  });
+
+  test.each([
+    ["Bash: the command, on one line", "Bash", { command: "git  status\n  --short", description: "x" }, "git status --short"],
+    ["Write: the file's base name", "Write", { file_path: "/work/demo/src/new.ts", content: "x" }, "new.ts"],
+    ["Read: the file's base name", "Read", { file_path: "/work/demo/README.md" }, "README.md"],
+    ["MultiEdit: the file's base name", "MultiEdit", { file_path: "/work/demo/a/b.ts", edits: [] }, "b.ts"],
+    ["NotebookEdit: the notebook's base name", "NotebookEdit", { notebook_path: "/work/demo/nb/analysis.ipynb", new_source: "x" }, "analysis.ipynb"],
+    ["Edit: file_path before notebook_path", "Edit", { notebook_path: "/n/other.ipynb", file_path: "/x/first.ts" }, "first.ts"],
+    ["WebFetch: the URL", "WebFetch", { url: "https://example.com/docs?a=1", prompt: "summarize" }, "https://example.com/docs?a=1"],
+    ["WebSearch: the query", "WebSearch", { query: "bun test  watch", allowed_domains: ["example.com"] }, "bun test watch"],
+    ["another tool: the first string value", "mcp__tracker__create_issue", { count: 3, project: "demo", title: "Crash on start" }, "demo"],
+    ["another tool: not a blank or empty one", "Grep", { head: "", pattern: "  \n", path: "src", glob: "*.ts" }, "src"],
+    ["another tool: nested strings are not looked at", "Task", { options: { deep: "x" }, list: ["y"], flag: true }, ""],
+    ["Bash without a command", "Bash", { description: "x" }, ""],
+    ["Bash with a command that is not text", "Bash", { command: 5 }, ""],
+    ["Edit with a path that is not text", "Edit", { file_path: 5 }, ""],
+    ["Edit without a path", "Edit", { old_string: "a" }, ""],
+    ["a tool without input", "Bash", undefined, ""],
+  ])("the key argument of a tool prompt: %s", async (_what, toolName, inputs, text) => {
+    const { sidebar, attention } = await listedWindow();
+    const asked = sidebar.requestPermission("c1", { ...bash, toolName, inputs });
+    expect(waitings(attention)).toEqual([expect.objectContaining({ requestId: asked.requestId, prompt: { kind: "tool", toolName, text } })]);
+  });
+
+  test.each([
+    ["the first question, on one line", { questions: question.inputs.questions }, "Which package manager?"],
+    ["no questions", { questions: [] }, ""],
+    ["no list of questions", {}, ""],
+    ["a first question that is not a record", { questions: ["Which?"] }, ""],
+    ["a first question that is not text", { questions: [{ question: 5 }] }, ""],
+  ])("the text of a question prompt: %s", async (_what, inputs, text) => {
+    const { sidebar, attention } = await listedWindow();
+    sidebar.requestPermission("c1", { ...question, inputs });
+    expect(waitings(attention)[0].prompt).toEqual({ kind: "question", toolName: "AskUserQuestion", text });
+  });
+
+  test("the text is cut to 140 characters and an ellipsis, never inside an emoji, and a text of 140 stays whole", async () => {
+    const { sidebar, attention } = await listedWindow();
+    const textOf = (inputs: Record<string, unknown>) => {
+      attention.length = 0;
+      sidebar.requestPermission("c1", { ...bash, inputs });
+      return waitings(attention)[0].prompt.text;
+    };
+    expect(textOf({ command: `echo ${"x".repeat(500)}` })).toBe(`echo ${"x".repeat(135)}…`);
+    expect(textOf({ command: "z".repeat(140) })).toBe("z".repeat(140));
+    expect(textOf({ command: "z".repeat(141) })).toBe(`${"z".repeat(140)}…`);
+    expect(textOf({ command: `${"y".repeat(139)}😀 and more` })).toBe(`${"y".repeat(139)}…`); // the pair would be cut in two
+    expect(textOf({ command: `${"y".repeat(138)}😀 and more` })).toBe(`${"y".repeat(138)}😀…`); // the pair fits
+    sidebar.emit("c1", { ...result("s1"), result: "R".repeat(500) });
+    expect(attention.at(-1)).toMatchObject({ kind: "done", text: `${"R".repeat(140)}…` });
+  });
+
+  test("the title is the live one, else the listed custom title or summary, else New session; cut to one short line", async () => {
+    const { provider, sidebar, tab, attention } = await listedWindow({
+      sessions: [
+        { id: "s1", summary: "Fix the flaky test", lastModified: 1_000 },
+        { id: "s2", summary: "A summary", customTitle: "Custom title", lastModified: 2_000 },
+        { id: "s3", lastModified: 500 },
+      ],
+    });
+    const titleOf = (comms: typeof sidebar, channel: string) => {
+      attention.length = 0;
+      comms.requestPermission(channel, bash);
+      return waitings(attention)[0].title;
+    };
+    expect(titleOf(sidebar, "c1")).toBe("Fix the flaky test"); // the listed summary
+    expect(titleOf(tab, "c2")).toBe("Custom title"); // a custom title wins over the summary
+    provider.sessionStates.set("s1", { info: { sessionId: "s1", state: "running", title: "Named by the panel" } });
+    expect(titleOf(sidebar, "c1")).toBe("Named by the panel"); // and the panel's own over both
+    provider.sessionStates.set("s1", { info: { sessionId: "s1", state: "running", title: "" } });
+    expect(titleOf(sidebar, "c1")).toBe("Fix the flaky test");
+    sidebar.openChannel("c3", "s3"); // listed, but without any title
+    expect(titleOf(sidebar, "c3")).toBe("New session");
+    sidebar.openChannel("c7", "s-unlisted"); // not listed at all
+    expect(titleOf(sidebar, "c7")).toBe("New session");
+
+    provider.sessionStates.set("s1", { info: { sessionId: "s1", state: "running", title: `first line\n\n  second   line ${"x".repeat(500)}` } });
+    const long = titleOf(sidebar, "c1");
+    expect(long.startsWith("first line second line xxx")).toBe(true);
+    expect(long.length).toBeLessThanOrEqual(201);
+  });
+
+  test("a window whose session list was never read still names a session by its live title, else New session", () => {
+    const { provider, sidebar, attention } = windowWith();
+    sidebar.requestPermission("c1", bash);
+    expect(waitings(attention)[0].title).toBe("New session");
+    provider.sessionStates.set("s1", { info: { sessionId: "s1", state: "waiting_input", title: "Live title" } });
+    sidebar.requestPermission("c1", edit);
+    expect(waitings(attention)[1].title).toBe("Live title");
+  });
+
+  test("a request id is remembered for the last 1000 requests only", async () => {
+    const { sidebar, attention } = await listedWindow();
+    const deliver = (n: number) => sidebar.send({ type: "request", channelId: "c1", requestId: `req-${n}`, request: bash });
+    for (let n = 0; n <= 1000; n++) deliver(n); // 1001 different requests
+    expect(waitings(attention)).toHaveLength(1001);
+    deliver(1000); // remembered
+    expect(waitings(attention)).toHaveLength(1001);
+    deliver(1); // still remembered: it is the oldest of the last 1000
+    expect(waitings(attention)).toHaveLength(1001);
+    deliver(0); // forgotten
+    expect(waitings(attention)).toHaveLength(1002);
+    expect(waitings(attention).at(-1)).toMatchObject({ requestId: "req-0" });
+  });
+
+  test("a listener that throws is logged, and does not keep the agent from its other work", async () => {
+    const { agent, sidebar, events, attention, logs } = await listedWindow();
+    agent.on("attention", (ev: any) => {
+      if (ev.kind === "open") throw new Error("listener broke");
+    });
+    const asked = sidebar.requestPermission("c1", bash);
+    expect(waitings(attention)).toEqual([expect.objectContaining({ requestId: asked.requestId })]); // `waiting` came after the failing `open`
+    expect(pendingEvents(events).at(-1)![1].pending).toHaveLength(1);
+    expect(logs.filter((line) => line === "window agent: listener broke").length).toBeGreaterThan(0);
+    expect((await agent.snapshot("s1")).pending).toHaveLength(1);
   });
 });
 
