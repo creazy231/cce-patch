@@ -40,6 +40,7 @@ const { acceptPeer, AUTH_TIMEOUT_MS } = require('./peer-link.js');
 const { LiteServer, respond, destroyWhenEnded } = require('./http-lite.js');
 const { Pairing, formatCode, createDevice, verifyToken, pairingLink } = require('./pairing.js');
 const { qrSvgPath } = require('./qr.js');
+const { Notifier } = require('./notifier.js');
 
 const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024; // after hello: a bigger frame closes the socket with 1009 (ws.js)
@@ -95,7 +96,8 @@ const CLOSE = {
  *     is closed) and upgrades being checked; more get 503;
  *   maxPreauthFrames: frames a socket may send before its hello (pair retries);
  *   maxSocketsPerDevice: a new hello closes the device's oldest socket past this (4409);
- *   maxPeers: peer links (VS Code windows) at once, those still waiting for their proof included; more get 503.
+ *   maxPeers: peer links (VS Code windows) at once, those still waiting for their proof included; more get 503;
+ *   lookFreshMs: a phone counts as looking only while it sent a frame this recently (40 s).
  */
 /** @type {Limits} */
 const DEFAULT_LIMITS = {
@@ -107,6 +109,7 @@ const DEFAULT_LIMITS = {
   maxPreauthFrames: 8,
   maxSocketsPerDevice: 4,
   maxPeers: 64,
+  lookFreshMs: 40_000,
 };
 
 // A device that does not exist still costs a token check, so a wrong id takes as long as a wrong token.
@@ -319,6 +322,7 @@ function actionCall(frame) {
  *   helloTimer: NodeJS.Timeout | null,
  *   preauthFrames: number,
  *   preauthCounted: boolean,
+ *   visible: boolean,
  *   lastFrameAt: number,
  *   subs: Map<string, { project: string, session: string }>,
  *   pending: Map<string, PendingSnapshot>,
@@ -356,6 +360,7 @@ class Hub extends EventEmitter {
    *   callTimeoutMs?: number | Partial<Record<string, number>>,
    *   peerAuthTimeoutMs?: number,
    *   limits?: Partial<Limits>,
+   *   notifier?: Partial<import('./notifier.js').NotifierOptions>,
    * }} options
    *   state: reads state.json now (loadState); updateState: store.updateState (fn mutates in place);
    *   log: a line without secrets, and its level; now: the clock of pairing codes and device times;
@@ -364,9 +369,10 @@ class Hub extends EventEmitter {
    *   idleTimeoutMs: a phone that sends nothing (the app pings every 25 s) is closed after this;
    *   callTimeoutMs: how long a window call may take: one number for every method, or some methods'
    *     own (the rest keep DEFAULT_CALL_TIMEOUTS_MS: send 50 s, active 10 s, the others 20 s);
-   *   peerAuthTimeoutMs: how long a peer link has to prove that it knows the secret (5 s).
+   *   peerAuthTimeoutMs: how long a peer link has to prove that it knows the secret (5 s);
+   *   notifier: what tests inject into the notifier (send, idleSeconds, sendOptions, limits).
    */
-  constructor({ state, updateState, tailscale, macName, log = () => {}, now = Date.now, helloTimeoutMs = 10_000, projectsDebounceMs = 300, idleTimeoutMs = 120_000, callTimeoutMs, peerAuthTimeoutMs = AUTH_TIMEOUT_MS, limits = {} }) {
+  constructor({ state, updateState, tailscale, macName, log = () => {}, now = Date.now, helloTimeoutMs = 10_000, projectsDebounceMs = 300, idleTimeoutMs = 120_000, callTimeoutMs, peerAuthTimeoutMs = AUTH_TIMEOUT_MS, limits = {}, notifier }) {
     super();
     this._readState = state;
     this._updateState = updateState;
@@ -434,6 +440,18 @@ class Hub extends EventEmitter {
     this._sweepTimer = null;
     /** @type {Set<NodeJS.Timeout>} */
     this._callTimers = new Set();
+
+    this._notifier = new Notifier({
+      ...notifier,
+      state: () => this._readState(),
+      updateState: (fn) => this._updateState(fn),
+      isLooking: (id) => this._isLooking(id),
+      macName: () => this._macNameText(),
+      log: (message, level) => this._log(message, level),
+      now: this._now,
+    });
+    this.on('attention', (event) => this._notifier.attention(event));
+    this.on('window-removed', (key) => this._notifier.windowRemoved(key));
   }
 
   /** The port the hub listens on; 0 before listen(). */
@@ -480,6 +498,7 @@ class Hub extends EventEmitter {
   close({ reason } = {}) {
     if (this._closing) return this._closing;
     this._closed = true;
+    this._notifier.close();
     this._closing = (async () => {
       if (this._projectsTimer) clearTimeout(this._projectsTimer);
       this._projectsTimer = null;
@@ -895,6 +914,7 @@ class Hub extends EventEmitter {
       helloTimer: null,
       preauthFrames: 0,
       preauthCounted: true,
+      visible: false,
       lastFrameAt: performance.now(),
       subs: new Map(),
       pending: new Map(),
@@ -949,6 +969,13 @@ class Hub extends EventEmitter {
     switch (frame.t) {
       case 'ping':
         return this._send(phone, { t: 'pong' });
+      case 'visibility':
+        if (typeof frame.visible === 'boolean') phone.visible = frame.visible;
+        return;
+      case 'push_set':
+      case 'push_clear':
+      case 'push_test':
+        return this._onPush(phone, frame);
       case 'sub':
         return this._onSub(phone, frame);
       case 'unsub':
@@ -966,6 +993,37 @@ class Hub extends EventEmitter {
         // A newer app's request: an answer at once instead of a timeout. Anything else is ignored.
         if (isAckId(frame.id)) this._send(phone, { t: 'ack', id: frame.id, ok: false, error: 'unknown_type' });
     }
+  }
+
+  /**
+   * push_set, push_clear and push_test: acked with the notifier's answer. A request without an id is
+   * an error frame, as for the window actions.
+   * @param {Phone} phone @param {Record<string, any>} frame
+   */
+  _onPush(phone, frame) {
+    const id = frame.id;
+    if (!isAckId(id)) return this._sendError(phone, 'bad_request', 'A request needs an id.');
+    /** @param {Record<string, any>} fields */
+    const ack = (fields) => this._send(phone, { t: 'ack', id, ...fields });
+    if (frame.t === 'push_test') {
+      this._notifier.test(phone.deviceId).then(
+        (result) => {
+          if (result.ok) ack({ ok: true });
+          else ack({ ok: false, error: result.error, ...(result.status !== undefined ? { status: result.status } : {}) });
+        },
+        () => ack({ ok: false, error: 'push_failed' }),
+      );
+      return;
+    }
+    let result;
+    try {
+      result = frame.t === 'push_set' ? this._notifier.setPush(phone.deviceId, frame) : this._notifier.clearPush(phone.deviceId);
+    } catch (error) {
+      this._log(`a push request failed: ${errorText(error)}`, 'error');
+      return ack({ ok: false, error: 'save_failed' });
+    }
+    if (result.ok) return ack({ ok: true });
+    return ack({ ok: false, error: result.error });
   }
 
   /** Before hello only pair and hello count; anything else closes the socket. @param {Phone} phone @param {string} line */
@@ -1051,6 +1109,7 @@ class Hub extends EventEmitter {
     phone.helloTimer = null;
     phone.authed = true;
     phone.deviceId = device.id;
+    phone.visible = true;
     phone.lastFrameAt = performance.now();
     this._releasePreauth(phone);
     phone.ws.setMaxPayload(MAX_FRAME_BYTES); // messages with photos
@@ -1065,7 +1124,7 @@ class Hub extends EventEmitter {
       this._sendError(same[i], 'too_many_connections', `This phone has more than ${this._limits.maxSocketsPerDevice} connections to the Mac; the oldest was closed.`);
       this._closePhone(same[i], CLOSE.replaced, 'replaced by a newer connection');
     }
-    this._send(phone, { t: 'welcome', v: PROTOCOL_VERSION, mac: { name: this._macNameText() } });
+    this._send(phone, { t: 'welcome', v: PROTOCOL_VERSION, mac: { name: this._macNameText() }, push: this._notifier.hasPush(device.id) });
     phone.lastProjects = this._projectsLine();
     this._sendText(phone, phone.lastProjects);
     if (wasIdle) this._setActive(true);
@@ -1226,6 +1285,22 @@ class Hub extends EventEmitter {
       },
       (error) => ack({ ok: false, error: errorText(error) }),
     );
+  }
+
+  /**
+   * Whether a paired phone of this device is looking at the app: an authed, open socket that said it
+   * is visible (the hello counts as visible) and sent a frame within lookFreshMs. A suspended app
+   * stops pinging, so it stops counting as looking.
+   * @param {string} deviceId
+   */
+  _isLooking(deviceId) {
+    const now = performance.now();
+    for (const phone of this._authed) {
+      if (phone.deviceId !== deviceId || phone.closed) continue;
+      if (phone.ws.readyState !== 'open') continue;
+      if (phone.visible !== false && now - phone.lastFrameAt <= this._limits.lookFreshMs) return true;
+    }
+    return false;
   }
 
   /** Closes the phones past their hello that sent nothing for idleTimeoutMs. */
@@ -1425,6 +1500,7 @@ class Hub extends EventEmitter {
       origin: text(device.origin),
       createdAt: finite(device.createdAt),
       lastSeenAt: Math.max(finite(device.lastSeenAt), this._lastSeen.get(text(device.id)) ?? 0),
+      push: isRecord(device.push),
     }));
   }
 

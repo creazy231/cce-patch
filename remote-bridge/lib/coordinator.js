@@ -77,7 +77,7 @@ const CONSENT_URL_RE = /^https:\/\/login\.tailscale\.com\//;
  * @typedef {{ installed: boolean, running: boolean, loginName?: string, dnsName?: string,
  *   httpsEnabled: boolean, consentUrl?: string }} TailscaleView
  * @typedef {{ code: string, expiresAt: number, link: string, qr?: { size: number, path: string } }} PairingView
- * @typedef {{ id: string, name: string, createdAt: number, lastSeenAt: number }} DeviceView
+ * @typedef {{ id: string, name: string, createdAt: number, lastSeenAt: number, push: boolean }} DeviceView
  * @typedef {{ enabled: boolean, role: Role, error?: string, port: number, url?: string, macName: string,
  *   tailscale: TailscaleView, serve: { configured: boolean }, windows: number, devices: DeviceView[],
  *   pairing?: PairingView, appUrl: string }} ConnectionStatus
@@ -180,7 +180,7 @@ function publicDevices(devices, seen) {
   for (const device of devices) {
     if (!isRecord(device) || !isText(device.id)) continue;
     const lastSeenAt = Math.max(time(device.lastSeenAt), seen?.get(device.id) ?? 0);
-    out.push({ id: device.id, name: isText(device.name) ? device.name : 'Phone', createdAt: time(device.createdAt), lastSeenAt });
+    out.push({ id: device.id, name: isText(device.name) ? device.name : 'Phone', createdAt: time(device.createdAt), lastSeenAt, push: isRecord(device.push) });
   }
   return out;
 }

@@ -478,6 +478,10 @@
       if (paired) meta.appendChild(make("span", "", "paired " + paired));
       if (paired) meta.appendChild(document.createTextNode(" · "));
       meta.appendChild(make("span", "", "last seen " + formatAgo(device.lastSeenAt)));
+      if (device.push === true) {
+        meta.appendChild(document.createTextNode(" · "));
+        meta.appendChild(make("span", "", "notifications on"));
+      }
       main.appendChild(meta);
       row.appendChild(main);
       row.appendChild(

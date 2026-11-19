@@ -392,6 +392,15 @@ describe("the Connection view", () => {
     expect(text(view(empty.host))).toContain("No phones paired yet.");
   });
 
+  test("a device with push shows notifications on", async () => {
+    const t = setup(answer({ ...HUB, devices: [{ ...HUB.devices[0], push: true }] }));
+    t.remote.mount(t.host);
+    await t.settle();
+    const device = byClass(t.host, "cce-conn-device");
+    expect(text(device)).toContain("last seen 5 min ago");
+    expect(text(device)).toContain(" · notifications on");
+  });
+
   test("names and errors from the host are shown as text, never as markup", async () => {
     const t = setup(answer({ ...HUB, error: "<img src=x onerror=alert(1)>", devices: [{ id: "x", name: "<b>bold</b>", createdAt: NOW, lastSeenAt: NOW }] }));
     t.remote.mount(t.host);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createIdleReader, parseIdleSeconds, userIdleSeconds } from "../lib/idle.js";
-import { sleep } from "./support";
+import { sleep, withTimeout } from "./support";
 
 // Every reader in here gets a stub `run`, so no test depends on the machine it runs on. The last two
 // tests use the default reader: the real `ioreg` on macOS (read-only, local), nothing elsewhere.
@@ -118,6 +118,13 @@ describe("createIdleReader", () => {
     finish(ioreg("42000000000"));
     expect(await Promise.all(reads)).toEqual([42, 42, 42]);
     expect(calls).toHaveLength(1);
+  });
+
+  test("a run that never settles gives Infinity after timeoutMs + 500 ms, so the shared read always settles", async () => {
+    const run = () => new Promise<string>(() => {});
+    const read = createIdleReader({ platform: "darwin", run, timeoutMs: 20 });
+    const reads = [read(), read()];
+    expect(await withTimeout(Promise.all(reads), "the idle read to settle", 2000)).toEqual([Infinity, Infinity]);
   });
 
   test("accepts what run gives as text, a Buffer or {stdout}", async () => {

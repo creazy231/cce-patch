@@ -53,14 +53,49 @@ function outputText(result) {
 }
 
 /**
- * Reads the idle time from ioreg. Never rejects: whatever goes wrong is Infinity.
+ * Waits for `run` at most `ms`, then gives Infinity. A run that never settles must not keep the
+ * shared pending read (and so every caller) waiting forever.
+ * @param {Promise<unknown>} run
+ * @param {number} ms
+ * @returns {Promise<unknown>}
+ */
+function withDeadline(run, ms) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve(Infinity);
+    }, ms);
+    timer.unref();
+    run.then(
+      (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(Infinity);
+      },
+    );
+  });
+}
+
+/**
+ * Reads the idle time from ioreg. Never rejects: whatever goes wrong is Infinity. The run is bounded
+ * by its own timeoutMs, and this waits 500 ms longer: a run that does not honour it is Infinity.
  * @param {Run} run
  * @param {number} timeoutMs
  * @returns {Promise<number>}
  */
 async function readIoreg(run, timeoutMs) {
   try {
-    return parseIdleSeconds(outputText(await run(IOREG, IOREG_ARGS, { timeoutMs }))) ?? Infinity;
+    const result = await withDeadline(Promise.resolve().then(() => run(IOREG, IOREG_ARGS, { timeoutMs })), timeoutMs + 500);
+    return parseIdleSeconds(outputText(result)) ?? Infinity;
   } catch {
     return Infinity;
   }

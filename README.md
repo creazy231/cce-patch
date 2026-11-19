@@ -53,6 +53,8 @@ A **Connection** tab next to **Local** and **Web** in the sessions panel puts th
 - **Phone app address.** Where you host the web app; it goes into the pairing link and QR code. Whoever controls that host can act as your paired phone, so host it somewhere you trust.
 - **On a Mac you share with other accounts, click Disconnect before you quit VS Code or revert the patch.** `tailscale serve` goes off by itself only when you close the last remaining VS Code window on its own. Quitting VS Code with two or more windows open, a crash or a force quit leaves it on until VS Code starts again. While serve is on and no VS Code window holds port 47821, a program of another account could take the port and receive your phone's next connection, its device token included.
 
+**Notifications.** With CCE Remote added to the iPhone's home screen and notifications turned on there, this Mac can send a push when a Claude Code session waits for you (a question, a permission prompt, a plan or a dialog) or finishes a turn; tapping one opens that session in the app. It needs remote access on, a VS Code window open and the Mac awake. Payloads are end-to-end encrypted (RFC 8291), so the push service (Apple's, or the phone's browser vendor's) sees only ciphertext and routing metadata, never session content. The app can limit pushes to when you are away from the Mac and can hide the details.
+
 The bridge behind it (in [`remote-bridge/`](remote-bridge/)) is copied into the extension and runs inside it, with no dependencies. To patch without it, add `--no-remote`.
 
 ### Multi-Editor Support

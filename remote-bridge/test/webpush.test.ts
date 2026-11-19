@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { b64url, encrypt, isAllowedEndpoint, sendPush, validSubscriptionKeys, validVapid, vapidAuthorization } from "../lib/webpush.js";
 import { sleep } from "./support";
 
@@ -143,6 +144,9 @@ function fakeRequest(script: Script = (_req, answer) => answer(201)) {
         res.statusCode = status;
         res.resume = () => {
           call.drained = true;
+          // A real response ends once its body has been read. The timer is cleared on 'end' or 'close',
+          // not when the status settles, so a stub that never ends would keep it armed.
+          queueMicrotask(() => res.emit("end"));
         };
         onResponse(res);
         return res;
@@ -664,6 +668,19 @@ describe("sendPush", () => {
     expect(slow.calls[0].destroyed).toBe(true);
   });
 
+  test("a response whose body stalls after its headers is destroyed at the timeout", async () => {
+    // The status is known, but the body never ends: the timer must still be armed and destroy it.
+    const stalled = fakeRequest((_req, answer) => {
+      const res = answer(201);
+      res.removeAllListeners("end"); // the stub's end never comes for this response
+      res.resume = () => {}; // and it is never drained either
+    });
+    const result = await sendPush(makePush().push, { request: stalled.request, timeoutMs: 40 });
+    expect(result).toEqual({ ok: true, status: 201, gone: false });
+    await sleep(80);
+    expect(stalled.calls[0].destroyed).toBe(true);
+  });
+
   test("a connection that drops while the response body is read does not escape as an error", async () => {
     // an EventEmitter throws for an 'error' nobody listens to; here that would be an uncaught exception
     const dropped = fakeRequest((_req, answer) => {
@@ -685,4 +702,19 @@ describe("sendPush", () => {
     expect(decrypt(byTopic.second.body, second.subscriber).toString()).toBe(second.push.payload);
     expect(byTopic.second.url).toBe("https://fcm.googleapis.com/fcm/send/abc");
   });
+});
+
+// ---- the production runtime ---------------------------------------------------------------------
+
+describe("under real Node", () => {
+  test.skipIf(!Bun.which("node"))(
+    "the RFC 8291 vector and a loopback push (remote-bridge/test/webpush-smoke.js)",
+    async () => {
+      const proc = Bun.spawn(["node", path.join(import.meta.dir, "webpush-smoke.js")], { stdout: "pipe", stderr: "pipe" });
+      const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      expect({ code, err }).toEqual({ code: 0, err: "" });
+      expect(out).toContain("webpush smoke: ok");
+    },
+    30_000,
+  );
 });

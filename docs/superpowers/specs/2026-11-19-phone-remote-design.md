@@ -52,8 +52,8 @@ Asked for, in their words:
 
 - Cloud ("Web" tab) sessions. They are on claude.ai and the official Claude app
   already covers them.
-- Push notifications while the web app is closed. That needs Web Push through
-  Apple's push service. A possible follow-up, not built now.
+- Push notifications while the web app is closed, through Apple's push service:
+  built in the follow-up design (`2026-11-19-push-notifications-design.md`).
 - Changing settings, models, permission modes (other than what a plan approval does
   in VS Code too), MCP servers, or files from the phone. No file browser and no diff
   viewer.
@@ -485,13 +485,17 @@ Auth, for every `/ws` upgrade:
 Client → hub:
 ```
 {t:"pair", code, device}                      → {t:"paired", deviceId, token, mac:{name}}
-{t:"hello", v:1, deviceId, token}             → {t:"welcome", v:1, mac:{name}} then {t:"projects", …}
+{t:"hello", v:1, deviceId, token}             → {t:"welcome", v:1, mac:{name}, push:boolean} then {t:"projects", …}
 {t:"sub", project, session}                   → {t:"snapshot", …} then live events
 {t:"unsub", project, session}
 {t:"send", id, project, session|null, text, images?:[{mediaType,data}]} → {t:"ack", id, ok, error?, session?}
 {t:"answer", id, project, session, requestId, choice}                     → ack
 {t:"interrupt", id, project, session}                                      → ack
 {t:"open", id, project, session} / {t:"openClaude", id, project}            → ack
+{t:"visibility", visible}                                                   (no reply)
+{t:"push_set", id, subscription:{endpoint, keys:{p256dh, auth}}, vapid:{publicKey, privateJwk}, subject, prefs:{waiting, done, onlyAway, details}} → ack
+{t:"push_clear", id}                                                        → ack
+{t:"push_test", id}                                                         → ack (push_off | push_gone | push_failed + status)
 {t:"ping"}                                                                 → {t:"pong"}
 ```
 `choice` (the bridge turns it into the exact VS Code payload):
@@ -507,9 +511,20 @@ Hub → client:
 {t:"msg", project, session, message}
 {t:"stream", project, session, event}
 {t:"pending", project, session, pending:[Pending]}  the full list whenever it changes
-{t:"ack", id, ok, error?, session?}
+{t:"ack", id, ok, error?, session?, status?}
 {t:"error", code, message}                          e.g. bad_token, bad_code, revoked
 ```
+Push frames (protocol version 1, backwards compatible): `welcome.push` says whether this
+Mac holds a subscription for the device. `push_set` validates the endpoint against the
+same allowlist used for sending, the subscription keys and the VAPID JWK, and the
+subject (`https:` or `mailto:`); prefs are booleans and missing ones default to on.
+Errors are `bad_request`, `bad_endpoint`, `bad_keys` and `save_failed`. `push_test`
+ignores looking, away and the flood cap; its ack carries `push_off`, `push_gone` or
+`push_failed` with the push service's status. `visibility` has no ack: a socket counts
+as visible from its hello until it says otherwise, and it stops counting as looking
+after 40 s without a frame. An old bridge answers the new acked frames with
+`unknown_type` and ignores `visibility`.
+
 Only `bad_token`, `bad_origin` and `revoked` mean the phone itself was refused: the app
 stops and asks to pair again. Any other error (e.g. `unsupported_version` before the
 welcome) is shown while the app keeps retrying; a code the app doesn't know shows the
@@ -694,6 +709,13 @@ pack, base directory `remote-app`, port 80, a domain with HTTPS).
   CSP, and the token kept only in the app origin's storage. The README states this
   plainly. It also names the stronger alternative for later: the bridge serves the
   built app itself on the `tailscale serve` origin.
+- **Outbound Web Push.** With notifications on, the hub POSTs an end-to-end encrypted
+  payload (RFC 8291) to the phone's push service (Apple's, Mozilla's, Google's or
+  Microsoft's), never to an arbitrary URL: the endpoint must be https on one of the
+  known push-service hosts. The push service sees the endpoint, the request headers
+  (VAPID JWT, TTL, Urgency, Topic) and the ciphertext; the session text stays
+  unreadable to it. The phone owns the VAPID key pair, and its private key sits in
+  `state.json` (0600) like the device token hashes.
 - **Other programs on the Mac can reach 127.0.0.1.** Any process may bind the port
   first (another macOS account, a sandboxed app, a container that publishes it: at
   login, while VS Code is closed, or in a handover). So the windows never send the

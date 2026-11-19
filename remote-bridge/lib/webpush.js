@@ -271,8 +271,12 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
     const settle = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       resolve(result);
+    };
+    // The timer stays armed after an answer: a response whose body stalls still has to be destroyed.
+    const stopTimer = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
     };
 
     try {
@@ -297,13 +301,19 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
         settle(failed());
         req?.destroy();
       }, timeoutMs);
+      timer.unref();
       req = request(new URL(endpoint), { method: 'POST', headers }, (res) => {
         res.on('error', () => {}); // the connection dropping while the body is read; the status stands
+        res.on('end', stopTimer); // the answer and its body are complete
+        res.on('close', stopTimer); // or the connection closed before the body ended
         res.resume(); // the body is of no use, and reading it off lets the connection go
         const status = Number(res.statusCode) || 0;
         settle({ ok: status >= 200 && status < 300, status, gone: status === 404 || status === 410 });
       });
-      req.on('error', () => settle(failed()));
+      req.on('error', () => {
+        stopTimer(); // no response will come
+        settle(failed());
+      });
       req.end(body);
     } catch {
       settle(failed());

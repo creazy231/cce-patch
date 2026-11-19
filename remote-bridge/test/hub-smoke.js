@@ -197,7 +197,7 @@ async function main() {
     const phone = openPhone(port, { 'Tailscale-User-Login': OWNER, Origin: ORIGIN });
     await phone.opened;
     phone.send({ t: 'hello', v: 1, deviceId: paired.deviceId, token: paired.token });
-    assert.deepEqual(await phone.next(), { t: 'welcome', v: 1, mac: { name: 'example-mac' } });
+    assert.deepEqual(await phone.next(), { t: 'welcome', v: 1, mac: { name: 'example-mac' }, push: false });
     assert.deepEqual(await phone.next(), { t: 'projects', projects: [PROJECT] });
     assert.equal(hub.phoneCount(), 1);
     phone.send({ t: 'sub', project: PROJECT.id, session: 's1' });

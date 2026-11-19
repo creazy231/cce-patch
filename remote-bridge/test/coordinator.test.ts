@@ -1027,7 +1027,7 @@ describe("Connection-tab actions", () => {
     expect(loadState(env).appUrl).toBe("https://app.example.com");
     await expect(b.coordinator.setAppUrl("http://app.example.com")).rejects.toThrow("bad_url");
     expect(loadState(env).appUrl).toBe("https://app.example.com");
-    expect((await b.coordinator.status()).devices).toEqual([{ id: "d1", name: "iPhone", createdAt: 1, lastSeenAt: 2 }]);
+    expect((await b.coordinator.status()).devices).toEqual([{ id: "d1", name: "iPhone", createdAt: 1, lastSeenAt: 2, push: false }]);
     await b.coordinator.removeDevice("d1");
     expect(loadState(env).devices).toEqual([]);
     expect(loadState(env).secret).toMatch(/^[0-9a-f]{64}$/);
@@ -1043,7 +1043,7 @@ describe("Connection-tab actions", () => {
     p.send({ t: "ping" });
     await p.next("pong");
     const atHub = (await a.coordinator.status()).devices;
-    expect(atHub).toEqual([{ id: p.deviceId, name: "iPhone", createdAt: expect.any(Number), lastSeenAt: expect.any(Number) }]);
+    expect(atHub).toEqual([{ id: p.deviceId, name: "iPhone", createdAt: expect.any(Number), lastSeenAt: expect.any(Number), push: false }]);
     expect(atHub[0].lastSeenAt).toBeGreaterThanOrEqual(before);
     expect((await b.coordinator.status()).devices[0].lastSeenAt).toBe(atHub[0].lastSeenAt);
     expect(loadState(env).devices[0].lastSeenAt).toBe(1);
@@ -1079,8 +1079,8 @@ describe("Connection-tab actions", () => {
     const { coordinator } = makeCoordinator(env);
     coordinator.start();
     expect((await coordinator.status()).devices).toEqual([
-      { id: "d1", name: "iPhone", createdAt: 1, lastSeenAt: 2 },
-      { id: "d2", name: "iPad", createdAt: 3, lastSeenAt: 4 },
+      { id: "d1", name: "iPhone", createdAt: 1, lastSeenAt: 2, push: false },
+      { id: "d2", name: "iPad", createdAt: 3, lastSeenAt: 4, push: false },
     ]);
     await coordinator.removeDevice("d1");
     await coordinator.setAppUrl(" https://app.example.com/ ");
@@ -1094,6 +1094,34 @@ describe("Connection-tab actions", () => {
     expect(state.enabled).toBe(false);
     await coordinator.setAppUrl("");
     expect(loadState(env).appUrl).toBe("");
+  });
+
+  test("a device with a push subscription shows push, without the subscription or its keys", async () => {
+    const port = await freePort();
+    const env = tempEnv(port);
+    updateState((state) => {
+      state.devices.push({
+        id: "d1",
+        name: "iPhone",
+        tokenHash: "0".repeat(64),
+        origin: "https://app.example.com",
+        createdAt: 1,
+        lastSeenAt: 2,
+        push: {
+          endpoint: "https://web.push.apple.com/QAbc",
+          keys: { p256dh: "p256dh", auth: "auth" },
+          vapid: { publicKey: "publicKey", privateJwk: { kty: "EC", crv: "P-256", x: "x", y: "y", d: "d" } },
+          subject: "https://app.example.test",
+          prefs: { waiting: true, done: true, onlyAway: true, details: true },
+          createdAt: 3,
+        },
+      });
+    }, env);
+    const { coordinator } = makeCoordinator(env);
+    coordinator.start();
+    const devices = (await coordinator.status()).devices;
+    expect(devices).toEqual([{ id: "d1", name: "iPhone", createdAt: 1, lastSeenAt: 2, push: true }]);
+    expect(JSON.stringify(devices)).not.toContain("web.push.apple.com");
   });
 });
 

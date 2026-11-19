@@ -5,8 +5,9 @@
 // State lives in a temp CCE_REMOTE_HOME; every hub listens on a free port. The last test runs
 // remote-bridge/test/hub-smoke.js under real Node.
 import { afterEach, describe, expect, test } from "bun:test";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createDecipheriv, createECDH, createHash, createHmac, generateKeyPairSync, hkdfSync, randomBytes } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -259,10 +260,11 @@ async function pairPhone(ctx: Ctx, { origin = APP_ORIGIN, device = "iPhone" } = 
 async function connectPhone(ctx: Ctx, creds: Creds, { origin = creds.origin }: { origin?: string | null } = {}) {
   const phone = await Phone.open(ctx.port, { origin });
   phone.send({ t: "hello", v: 1, deviceId: creds.deviceId, token: creds.token });
-  expect(await phone.next("welcome")).toEqual({ t: "welcome", v: 1, mac: { name: MAC_NAME } });
+  const welcome = await phone.next("welcome");
+  expect(welcome).toMatchObject({ t: "welcome", v: 1, mac: { name: MAC_NAME } });
   const projects = await phone.next("projects");
   expect(projects.t).toBe("projects");
-  return { phone, projects: projects.projects as Json[] };
+  return { phone, projects: projects.projects as Json[], welcome };
 }
 
 async function pairedPhone(ctx: Ctx) {
@@ -342,6 +344,68 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 const newNonce = () => randomBytes(32).toString("hex");
 const proofOf = (secret: string, side: "hub" | "peer", peerNonce: string, hubNonce: string) =>
   createHmac("sha256", secret).update(`${side}\n${peerNonce}\n${hubNonce}`).digest("hex");
+
+// ---- Web Push fixtures ---------------------------------------------------------------------------
+
+const APPLE = "https://web.push.apple.com/QAbc";
+const PUSH_SUBJECT = "https://app.example.test";
+const b = (text: string) => Buffer.from(text, "base64url");
+
+interface Subscriber {
+  privateKey: Buffer;
+  publicKey: Buffer;
+  auth: Buffer;
+  keys: { p256dh: string; auth: string };
+}
+
+/** A push subscription's keys, as a browser makes them. */
+function makeSubscriber(): Subscriber {
+  const ecdh = createECDH("prime256v1");
+  ecdh.generateKeys();
+  const auth = randomBytes(16);
+  const publicKey = ecdh.getPublicKey();
+  return { privateKey: ecdh.getPrivateKey(), publicKey, auth, keys: { p256dh: publicKey.toString("base64url"), auth: auth.toString("base64url") } };
+}
+
+/** VAPID keys: the raw public key and the private key as a JWK. */
+function makeVapid() {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const privateJwk = privateKey.export({ format: "jwk" }) as unknown as { x: string; y: string; [member: string]: unknown };
+  const publicKey = Buffer.concat([Buffer.from([4]), b(privateJwk.x), b(privateJwk.y)]).toString("base64url");
+  return { publicKey, privateJwk };
+}
+
+/** A push_set frame for this device. */
+function pushFrame(subscriber: Subscriber, vapid: ReturnType<typeof makeVapid>, overrides: Record<string, unknown> = {}) {
+  return {
+    t: "push_set",
+    subscription: { endpoint: APPLE, keys: subscriber.keys },
+    vapid,
+    subject: PUSH_SUBJECT,
+    prefs: { waiting: true, done: true, onlyAway: false, details: true },
+    ...overrides,
+  };
+}
+
+/** The browser's side of RFC 8291: opens an aes128gcm body with the subscriber's keys. */
+function decryptPush(body: Buffer, subscriber: Subscriber): Buffer {
+  const salt = body.subarray(0, 16);
+  const idLength = body[20];
+  const senderPublic = body.subarray(21, 21 + idLength);
+  const sealed = body.subarray(21 + idLength);
+  const ecdh = createECDH("prime256v1");
+  ecdh.setPrivateKey(subscriber.privateKey);
+  const secret = ecdh.computeSecret(senderPublic);
+  const info = Buffer.concat([Buffer.from("WebPush: info\0"), subscriber.publicKey, senderPublic]);
+  const ikm = Buffer.from(hkdfSync("sha256", secret, subscriber.auth, info, 32));
+  const cek = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16));
+  const nonce = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: nonce\0"), 12));
+  const decipher = createDecipheriv("aes-128-gcm", cek, nonce);
+  decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+  const record = Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - 16)), decipher.final()]);
+  expect(record[record.length - 1]).toBe(0x02);
+  return record.subarray(0, record.length - 1);
+}
 
 /** A peer's upgrade request, by hand: Host and a nonce unless `extra` says otherwise. */
 function peerUpgrade({ host = "127.0.0.1", nonce = newNonce(), extra = "" }: { host?: string | null; nonce?: string | null; extra?: string } = {}): string {
@@ -864,7 +928,7 @@ describe("pairing", () => {
     expect(ctx.state().devices).toEqual([
       { id: paired.deviceId, name: "iPhone", tokenHash: sha256(paired.token), origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0 },
     ]);
-    expect(ctx.hub.devices()).toEqual([{ id: paired.deviceId, name: "iPhone", origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0 }]);
+    expect(ctx.hub.devices()).toEqual([{ id: paired.deviceId, name: "iPhone", origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0, push: false }]);
     expect(ctx.hub.info().pairing).toBeNull(); // used up
     expect(JSON.stringify(ctx.logs)).not.toContain(paired.token);
     expect(JSON.stringify(ctx.logs)).not.toContain(code.replace("-", ""));
@@ -986,7 +1050,7 @@ describe("pairing", () => {
     phone.send({ t: "pair", code, device: "iPhone" });
     const paired = await phone.next();
     phone.send({ t: "hello", v: 1, deviceId: paired.deviceId, token: paired.token });
-    expect(await phone.next()).toEqual({ t: "welcome", v: 1, mac: { name: MAC_NAME } });
+    expect(await phone.next()).toMatchObject({ t: "welcome", v: 1, mac: { name: MAC_NAME } });
     expect(ctx.hub.phoneCount()).toBe(1);
   });
 
@@ -1676,7 +1740,7 @@ describe("devices", () => {
     expect(ctx.hub.info()).toEqual({
       windows: 2,
       phones: 1,
-      devices: [{ id: creds.deviceId, name: "iPhone", origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0 }],
+      devices: [{ id: creds.deviceId, name: "iPhone", origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0, push: false }],
       pairing,
     });
   });
@@ -2098,6 +2162,162 @@ describe("attention", () => {
     for (const ev of [waiting(), open(), done()]) w.handle.attention(ev);
     await roundTrip(phone);
     await phone.expectQuiet();
+  });
+});
+
+// ---- push ---------------------------------------------------------------------------------------
+
+// The new protocol frames and the notifier behind them: push_set/push_clear/push_test, welcome.push,
+// the looking rule, the devices view, and one real push to a local HTTP server standing in for the
+// push service. The notifier's send is a fake everywhere but the end-to-end test.
+
+describe("push", () => {
+  const waiting = (session = "s1", requestId = "r-1") => ({
+    kind: "waiting",
+    session,
+    requestId,
+    title: "Fix the flaky test",
+    prompt: { kind: "tool", toolName: "Bash", text: "npm test" },
+  });
+
+  function fakePushSender() {
+    const sends: Json[] = [];
+    const send = async (push: Json) => {
+      sends.push(push);
+      return { ok: true, status: 201, gone: false };
+    };
+    return { sends, send };
+  }
+
+  test("push_set, push_clear and push_test are acked", async () => {
+    const sender = fakePushSender();
+    const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });
+    const { phone } = await pairedPhone(ctx);
+    const subscriber = makeSubscriber();
+    const vapid = makeVapid();
+
+    phone.send(pushFrame(subscriber, vapid, { id: "p1" }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    phone.send({ t: "push_test", id: "p2" });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p2", ok: true });
+    expect(sender.sends).toHaveLength(1);
+    phone.send({ t: "push_clear", id: "p3" });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p3", ok: true });
+    phone.send({ t: "push_test", id: "p4" });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p4", ok: false, error: "push_off" });
+
+    phone.send(pushFrame(subscriber, vapid)); // no id
+    expect(await nextFrame(phone, "error")).toEqual({ t: "error", code: "bad_request", message: expect.any(String) });
+  });
+
+  test("welcome tells whether this Mac holds a subscription", async () => {
+    const sender = fakePushSender();
+    const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });
+    const creds = await pairPhone(ctx);
+    const first = await connectPhone(ctx, creds);
+    expect(first.welcome.push).toBe(false);
+    first.phone.send(pushFrame(makeSubscriber(), makeVapid(), { id: "p1" }));
+    expect(await nextFrame(first.phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    const second = await connectPhone(ctx, creds);
+    expect(second.welcome.push).toBe(true);
+  });
+
+  test("a looking phone gets no push, a hidden one does", async () => {
+    const sender = fakePushSender();
+    const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send(pushFrame(makeSubscriber(), makeVapid(), { id: "p1" }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    const w = fakeWindow(ctx.hub);
+    w.handle.attention(waiting("s1", "r-1"));
+    await sleep(40);
+    expect(sender.sends).toHaveLength(0); // the phone is visible and just sent frames
+    phone.send({ t: "visibility", visible: false });
+    await roundTrip(phone);
+    w.handle.attention(waiting("s1", "r-2"));
+    await sleep(40);
+    expect(sender.sends).toHaveLength(1);
+  });
+
+  test("a phone that went silent counts as not looking", async () => {
+    const sender = fakePushSender();
+    const ctx = await startHub({
+      hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } }, limits: { lookFreshMs: 50 } },
+    });
+    const { phone } = await pairedPhone(ctx);
+    phone.send(pushFrame(makeSubscriber(), makeVapid(), { id: "p1" }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    await sleep(80); // no frames: past lookFreshMs
+    const w = fakeWindow(ctx.hub);
+    w.handle.attention(waiting());
+    await sleep(40);
+    expect(sender.sends).toHaveLength(1);
+  });
+
+  test("devices show push without the keys", async () => {
+    const sender = fakePushSender();
+    const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });
+    const { creds, phone } = await pairedPhone(ctx);
+    phone.send(pushFrame(makeSubscriber(), makeVapid(), { id: "p1" }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    const devices = ctx.hub.devices();
+    expect(devices).toEqual([{ id: creds.deviceId, name: "iPhone", origin: APP_ORIGIN, createdAt: T0, lastSeenAt: T0, push: true }]);
+    const json = JSON.stringify(devices);
+    expect(json).not.toContain(APPLE);
+    expect(json).not.toContain('"d"');
+  });
+
+  test("a push reaches the push service end to end", async () => {
+    const subscriber = makeSubscriber();
+    const vapid = makeVapid();
+    let received: { headers: Json; body: Buffer } | null = null;
+    let resolveReceived: () => void = () => {};
+    const receivedPush = new Promise<void>((resolve) => (resolveReceived = resolve));
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        received = { headers: req.headers, body: Buffer.concat(chunks) };
+        res.statusCode = 201;
+        res.end();
+        resolveReceived();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    closers.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as net.AddressInfo).port;
+    const endpoint = `http://127.0.0.1:${port}/push/abc`;
+
+    const ctx = await startHub({
+      hub: {
+        notifier: {
+          sendOptions: { request: http.request, allowEndpoint: () => true },
+          idleSeconds: async () => 9999,
+          limits: { graceMs: 0 },
+        },
+      },
+    });
+    const w = fakeWindow(ctx.hub);
+    const { creds, phone } = await pairedPhone(ctx);
+    phone.send(pushFrame(subscriber, vapid, { id: "p1", subscription: { endpoint, keys: subscriber.keys } }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    phone.terminate();
+    await phone.closed();
+
+    w.handle.attention(waiting());
+    await withTimeout(receivedPush, "the push to reach the local server");
+    expect(received).not.toBeNull();
+    const payload = JSON.parse(decryptPush(received!.body, subscriber).toString("utf8"));
+    expect(payload).toEqual({
+      v: 1,
+      kind: "waiting",
+      title: "cce-patch",
+      body: "Fix the flaky test\nAllow Bash: npm test?",
+      tag: `${creds.deviceId}:${ID}:s1`,
+      url: `/?mac=${creds.deviceId}&project=${ID}&session=s1`,
+      mac: creds.deviceId,
+      badge: 1,
+    });
   });
 });
 
