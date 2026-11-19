@@ -7,6 +7,10 @@ dist/
 !*.config.js
 # claude-commit/ is a plain-JavaScript VS Code extension (no build step)
 !claude-commit/**/*.js
+# remote-bridge/ is plain JavaScript too: it runs inside the Claude Code extension host (no build step)
+!remote-bridge/**/*.js
+# remote-app's service worker is a static file the build copies as is
+!remote-app/public/sw.js
 
 # OS files
 .DS_Store

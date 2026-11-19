@@ -43,6 +43,18 @@ Start typing in a session, switch to another one, come back — your **text, `@`
 
 A **Generate Commit Message with Claude** button for the Source Control view (a small companion extension in [`claude-commit/`](claude-commit/), which `patch.ts` installs into the same editors; see [Usage](#claude-commit-message-button)). It does exactly what the built-in ✨ button does: it reads the staged changes (or all changes when nothing is staged) and your last commit messages, follows your `github.copilot.chat.commitMessageGeneration.instructions`, and fills in the commit message box. The message comes from **Claude Haiku through your Claude Code login**, typically in 2–4 seconds. Click the button again while it runs to stop it.
 
+### Phone Remote
+
+A **Connection** tab next to **Local** and **Web** in the sessions panel puts this Mac on your [Tailscale](https://tailscale.com) network, so **CCE Remote**, a web app you add to your phone's home screen (in [`remote-app/`](remote-app/)), can follow and drive your Claude Code sessions: every open VS Code window shows up as a project with its sessions and their live status, and from the phone you can read a session as it streams, answer permission prompts, questions and plan approvals, send messages (photos too), stop a turn, and start new sessions.
+
+- **Off until you turn it on.** Nothing listens until you click **Connect with Tailscale**. Then it stays on (every window joins in, and it comes back when VS Code starts again) until you click **Disconnect**. Closing the last remaining VS Code window on its own turns `tailscale serve` off until the next start. Quitting VS Code with two or more windows open leaves serve on (the windows stop together, so none of them is the last one), and so does a crash: until VS Code starts again, you click **Disconnect**, or you run `bun run patch.ts --revert`.
+- **Only your phone, only inside your tailnet.** The Mac is reachable through `tailscale serve` (HTTPS on its Tailscale name, port 47821), never through Tailscale Funnel or a public address. A phone has to belong to the Mac's own Tailscale user and is paired once with a one-time code (QR code or link) from the Connection tab; it then has its own token, which **Paired devices** can revoke.
+- **HTTPS certificates.** The phone app runs over HTTPS, so the Mac needs a Tailscale HTTPS certificate: turn on HTTPS certificates for your tailnet once (the tab links to the page). That publishes the Mac's Tailscale name (`<machine>.<tailnet>.ts.net`) in public certificate logs, so rename the machine in Tailscale first if the name is personal.
+- **Phone app address.** Where you host the web app; it goes into the pairing link and QR code. Whoever controls that host can act as your paired phone, so host it somewhere you trust.
+- **On a Mac you share with other accounts, click Disconnect before you quit VS Code or revert the patch.** `tailscale serve` goes off by itself only when you close the last remaining VS Code window on its own. Quitting VS Code with two or more windows open, a crash or a force quit leaves it on until VS Code starts again. While serve is on and no VS Code window holds port 47821, a program of another account could take the port and receive your phone's next connection, its device token included.
+
+The bridge behind it (in [`remote-bridge/`](remote-bridge/)) is copied into the extension and runs inside it, with no dependencies. To patch without it, add `--no-remote`.
+
 ### Multi-Editor Support
 
 Automatically detects and patches **all installed editors** in a single run:
@@ -79,6 +91,9 @@ bun run patch.ts --revert
 
 # Patch without touching the commit message button
 bun run patch.ts --no-commit-button
+
+# Patch without the phone remote (no Connection tab, no bridge in the extension)
+bun run patch.ts --no-remote
 ```
 
 ### With npm / Node.js
@@ -132,20 +147,22 @@ Settings: `claudeCommit.model` (`haiku` by default, the fastest; `sonnet`, `opus
 
 ## How It Works
 
-The patcher modifies three files inside each editor's Claude Code extension directory:
+The patcher modifies three files inside each editor's Claude Code extension directory, and adds one folder:
 
 | File | What Changes |
 |------|-------------|
-| `extension.js` | Enables `sessionsListEnabled` and `primaryEditorEnabled` feature flags, starts the CLI with `--effort max` unless another level is set |
-| `webview/index.js` | Removes dropdown close behavior, injects status dot elements, defaults "Include Selection" to off, keeps each session's draft |
-| `webview/index.css` | Restyles the dropdown as a fixed sidebar panel, adds status dot styles with pulse animations |
+| `extension.js` | Enables `sessionsListEnabled` and `primaryEditorEnabled` feature flags, starts the CLI with `--effort max` unless another level is set, hands each window's webview provider to the phone remote bridge |
+| `webview/index.js` | Removes dropdown close behavior, injects status dot elements, defaults "Include Selection" to off, keeps each session's draft, adds the Connection tab |
+| `webview/index.css` | Restyles the dropdown as a fixed sidebar panel, adds status dot styles with pulse animations, styles the Connection tab |
+| `cce-remote/` (new) | The phone remote bridge, copied from `remote-bridge/` |
 
 ### Safety
 
 - **Backups** are created automatically on first run (`.bak` files alongside each original)
-- **Revert** restores the exact original files from backup
+- **Revert** restores the exact original files from backup and deletes `cce-remote/`. If the phone remote is on, it also turns it off and turns `tailscale serve` off for its port (when Tailscale doesn't answer within 20 s, it prints the command to run). It looks at serve only while remote access is on: a serve left on after remote access was turned off (a turn-off that failed, which the Connection tab reports) survives a revert, so run `tailscale serve --https=47821 off` yourself. `~/.cce-remote/` stays, with your paired phones and the phone app address; delete it to forget them
 - **Idempotent** — re-running the patch always reads from the original backup, so it's safe to run multiple times
-- **No network access** — the script only reads and writes local files
+- **No network access** — the script only reads and writes local files (and `--revert` asks the local Tailscale CLI to turn `tailscale serve` off)
+- **Fails closed** — when an extension update moves code the patch hooks into, that part is skipped and reported as `FAIL`; the rest of the extension keeps working. The phone remote listens (on 127.0.0.1:47821 only) only while it's turned on
 
 ---
 
@@ -159,6 +176,9 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 | Want to start fresh | Run `--revert` first, then delete any `.bak` files, then re-patch |
 | Claude commit button only in the "Changes" title bar | Quit and reopen the editor once; `argv.json` changes need a full restart |
 | Claude commit button says Claude Code isn't logged in | Run `claude` in a terminal and log in, or set `claudeCommit.claudePath` |
+| Connection tab says the bridge isn't running | Run the patch again from a complete checkout (the patch output must show `ok   remote bridge files`), then `Reload Window` |
+| Connection tab: "HTTPS certificates are off" | Click **Turn on HTTPS** and enable HTTPS certificates for your tailnet, then **Connect with Tailscale** again |
+| The phone can't reach the Mac | Turn Tailscale on on the phone, signed in as the same Tailscale user as the Mac |
 
 ---
 

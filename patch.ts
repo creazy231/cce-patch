@@ -14,13 +14,28 @@
  * It also installs the Claude commit message button (the companion extension in claude-commit/)
  * into the same editors; --revert uninstalls it, --no-commit-button leaves it alone.
  *
- * Usage: bun run /Volumes/WD_BLACK/PROJECTS/cce-patch/patch.ts [--revert] [--no-commit-button]
+ * Phone remote (remote-bridge/): a Connection tab next to Local and Web in the sessions panel,
+ * which connects this Mac to Tailscale so the CCE Remote web app (remote-app/) can control the
+ * sessions from a phone. The bridge is copied into the extension (cce-remote/) and hooked into
+ * extension.js; it stays off until "Connect with Tailscale" is clicked. --no-remote leaves it out.
+ * --revert also turns remote access off (~/.cce-remote/state.json) and `tailscale serve` with it.
+ *
+ * Usage: bun run patch.ts [--revert] [--no-commit-button] [--no-remote]
  */
 
 import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { installCommitButton } from "./claude-commit/install.ts";
+import {
+  REMOTE_DIR,
+  installRemoteBridge,
+  patchConnectionCss,
+  patchExtensionRemote,
+  patchWebviewConnection,
+  removeRemoteBridge,
+  turnRemoteAccessOff,
+} from "./remote-bridge/install.ts";
 
 const EDITOR_CONFIGS = [
   { label: "VS Code Insiders", extDir: join(homedir(), ".vscode-insiders", "extensions") },
@@ -1081,7 +1096,7 @@ function patchExtensionJs(code: string): { patched: string; count: number } {
   return { patched, count };
 }
 
-function patchOne(extDir: string, label: string, revert: boolean): boolean {
+function patchOne(extDir: string, label: string, revert: boolean, remote: boolean): boolean {
   const extJs = join(extDir, "extension.js");
   const extJsBak = join(extDir, "extension.js.bak");
   const webviewJs = join(extDir, "webview", "index.js");
@@ -1103,7 +1118,9 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
         console.log(`  Reverted ${dst}`);
       }
     }
-    if (reverted === 0) {
+    const removedBridge = removeRemoteBridge(extDir);
+    if (removedBridge) console.log(`  Removed ${REMOTE_DIR}`);
+    if (reverted === 0 && !removedBridge) {
       console.error("  No backup files found — skipping.");
       return false;
     }
@@ -1136,11 +1153,34 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   extPatched = extEffortResult.patched;
   extCount += extEffortResult.count;
 
+  if (remote) {
+    console.log("\n[extension.js — remote bridge hook]");
+    const extRemoteResult = patchExtensionRemote(extPatched);
+    extPatched = extRemoteResult.patched;
+    extCount += extRemoteResult.count;
+  }
+
   if (extCount > 0) {
     writeFileSync(extJs, extPatched, "utf-8");
     totalPatches += extCount;
   } else {
     console.log("  No extension.js patches needed.");
+  }
+
+  // The bridge the hook loads: remote-bridge/ → <ext>/cce-remote/ (stale copies go first).
+  let bridgeFiles = 0;
+  if (remote) {
+    console.log(`\n[${REMOTE_DIR}/ — remote bridge files]`);
+    try {
+      bridgeFiles = installRemoteBridge(extDir);
+      console.log(bridgeFiles > 0
+        ? `  Copied ${bridgeFiles} file(s) to ${join(extDir, REMOTE_DIR)}`
+        : "  remote-bridge/bridge.js not found — the bridge isn't installed");
+    } catch (e) {
+      console.log(`  Could not copy the bridge: ${e instanceof Error ? e.message : e}`);
+    }
+  } else if (removeRemoteBridge(extDir)) {
+    console.log(`\n  Removed ${REMOTE_DIR} (--no-remote)`);
   }
 
   // 2. Patch webview/index.js (sidebar + status dots)
@@ -1173,6 +1213,15 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   wvJsCode = draftResult.patched;
   wvJsCount += draftResult.count;
 
+  let connChecks = { attach: false, tab: false };
+  if (remote) {
+    console.log("\n[webview/index.js — Connection tab]");
+    const connResult = patchWebviewConnection(wvJsCode);
+    wvJsCode = connResult.patched;
+    wvJsCount += connResult.count;
+    connChecks = connResult.checks;
+  }
+
   console.log("\n[webview/index.js — panel resize]");
   const panelClass = wvJsOriginal.match(/dropdown:"(dropdown_\w+)"/)?.[1];
   if (panelClass && wvJsCode.includes('className:"cce-sash"')) {
@@ -1197,18 +1246,36 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
     ["panel resize handle added", wvJsCode.includes("cce-patch: drag-to-resize the sessions panel")],
     ["drafts kept per session", draftResult.count > 0],
   ];
+  // A missing bridge is a missing file next to patch.ts, not a changed bundle: reported apart.
+  const bridgeOk = bridgeFiles > 0 && existsSync(join(extDir, REMOTE_DIR, "bridge.js"));
+  if (remote) {
+    checks.push(
+      ["remote bridge hook (extension.js)", extPatched.includes(`require("./${REMOTE_DIR}/bridge.js").attach(p)`)],
+      ["remote bridge files", bridgeOk],
+      ["Connection tab", connChecks.tab],
+      ["Connection runtime attached", connChecks.attach],
+    );
+  }
   let failed = 0;
   for (const [name, pass] of checks) {
     console.log(`  ${pass ? "ok  " : "FAIL"} ${name}`);
     if (!pass) failed++;
   }
-  if (failed > 0) {
+  const shapeFailed = failed - (remote && !bridgeOk ? 1 : 0);
+  if (shapeFailed > 0) {
     console.log(
-      `\n  !! ${failed} check(s) failed — the extension bundle likely changed shape.\n` +
+      `\n  !! ${shapeFailed} check(s) failed — the extension bundle likely changed shape.\n` +
       `     Each FAIL above needs its patch function's anchors updated for this version\n` +
       `     (sidebar + resize handle: patchWebviewJs, dots: patchSessionStatusDots,\n` +
       `      selection: patchIncludeSelectionDefault / patchSelectionOptIn,\n` +
-      `      drafts: patchDraftPersistence / patchComposerDraft).`
+      `      drafts: patchDraftPersistence / patchComposerDraft` +
+      (remote ? `,\n      phone remote: remote-bridge/install.ts).` : `).`)
+    );
+  }
+  if (remote && !bridgeOk) {
+    console.log(
+      `\n  !! The bridge isn't in ${REMOTE_DIR}/ (remote-bridge/bridge.js missing or not copied): the Connection\n` +
+      `     tab will say the bridge isn't running. Run the patch again from a complete checkout.`
     );
   }
 
@@ -1244,6 +1311,13 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   wvCssCode = selCssResult.patched;
   wvCssCount += selCssResult.count;
 
+  if (remote) {
+    console.log("\n[webview/index.css — Connection tab]");
+    const connCssResult = patchConnectionCss(wvCssCode, wvJsOriginal);
+    wvCssCode = connCssResult.patched;
+    wvCssCount += connCssResult.count;
+  }
+
   if (wvCssCount > 0) {
     writeFileSync(webviewCss, wvCssCode, "utf-8");
     totalPatches += wvCssCount;
@@ -1260,8 +1334,29 @@ function patchOne(extDir: string, label: string, revert: boolean): boolean {
   return true;
 }
 
-function patch(revert: boolean, commitButton: boolean) {
-  const editors = findAllExtensionDirs();
+/**
+ * `--revert`'s part outside the extensions: removing the bridge doesn't stop `tailscale serve`
+ * (a window that served keeps the port published until it's turned off), and the state file
+ * would turn remote access on again after a later patch.
+ */
+async function revertRemoteAccess() {
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`  Phone remote: remote access and tailscale serve`);
+  console.log("=".repeat(60));
+  await turnRemoteAccessOff();
+}
+
+async function patch(revert: boolean, commitButton: boolean, remote: boolean) {
+  let editors: { label: string; dir: string }[];
+  try {
+    editors = findAllExtensionDirs();
+  } catch (error) {
+    // No extension left to revert, but remote access may still be on.
+    if (!revert) throw error;
+    console.error(error instanceof Error ? error.message : error);
+    await revertRemoteAccess();
+    process.exit(1);
+  }
   console.log(`Found ${editors.length} editor(s) with Claude Code:\n`);
   for (const { label, dir } of editors) {
     console.log(`  - ${label}: ${dir}`);
@@ -1269,9 +1364,12 @@ function patch(revert: boolean, commitButton: boolean) {
 
   let successCount = 0;
   for (const { label, dir } of editors) {
-    const ok = patchOne(dir, label, revert);
+    const ok = patchOne(dir, label, revert, remote);
     if (ok) successCount++;
   }
+
+  // Whatever happened to the editors above.
+  if (revert) await revertRemoteAccess();
 
   // The commit message button doesn't depend on the patches, so it goes in even when they fail.
   let buttonOk = true;
@@ -1296,8 +1394,15 @@ function patch(revert: boolean, commitButton: boolean) {
     console.log("The commit message button works right away from the \"Changes\" title bar; it moves into the");
     console.log("commit message box after the editor's next full restart (quit and reopen).");
   }
+  if (remote && !revert) {
+    console.log("The phone remote stays off until you click \"Connect with Tailscale\" in the sessions panel's Connection tab.");
+  }
   if (!revert) console.log("To revert: bun run patch.ts --revert");
 }
 
 const revert = process.argv.includes("--revert");
-patch(revert, !process.argv.includes("--no-commit-button"));
+// No top-level await: `npx tsx patch.ts` may run this file as CommonJS.
+patch(revert, !process.argv.includes("--no-commit-button"), !process.argv.includes("--no-remote")).catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

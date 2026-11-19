@@ -1,0 +1,866 @@
+/* The shell: reset, the frame that follows the visible viewport, screens, bars, buttons, fields, sheets. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16px/1.45 var(--font);
+  font-kerning: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* With black-translucent the status bar's text is white: in light mode it gets a dark band to sit on. */
+body::before {
+  content: "";
+  position: fixed;
+  z-index: 60;
+  inset: 0 0 auto;
+  height: var(--sat);
+  background: var(--statusbar);
+  pointer-events: none;
+}
+
+#app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-h, 100dvh);
+  transform: translate3d(0, var(--app-top, 0px), 0);
+  overflow: hidden;
+}
+
+.frame {
+  position: absolute;
+  inset: 0;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  text-align: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+.mono {
+  font-size: 0.92em;
+  letter-spacing: -0.01em;
+}
+
+.icon {
+  display: block;
+  flex: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- screens and their transitions ---- */
+
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  animation: screen-fade 0.28s var(--ease-out) both;
+}
+
+.frame[data-nav="push"] .screen {
+  animation: screen-push 0.36s var(--ease-out) both;
+}
+
+.frame[data-nav="pop"] .screen {
+  animation: screen-pop 0.34s var(--ease-out) both;
+}
+
+@keyframes screen-push {
+  from {
+    opacity: 0;
+    transform: translate3d(32px, 0, 0);
+  }
+}
+
+@keyframes screen-pop {
+  from {
+    opacity: 0;
+    transform: translate3d(-24px, 0, 0);
+  }
+}
+
+@keyframes screen-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 calc(var(--gutter) + var(--sar)) calc(var(--sab) + 40px) calc(var(--gutter) + var(--sal));
+}
+
+/* ---- the top bar of inner screens ---- */
+
+.navbar {
+  flex: none;
+  position: relative;
+  z-index: 6;
+  display: grid;
+  grid-template-columns: minmax(64px, 1fr) minmax(0, 4fr) minmax(64px, 1fr);
+  align-items: center;
+  min-height: calc(var(--sat) + 52px);
+  padding: var(--sat) calc(4px + var(--sar)) 0 calc(4px + var(--sal));
+  background: var(--bg);
+}
+
+.navbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0.5px;
+  background: var(--line);
+}
+
+.navbar-side {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.navbar-side.right {
+  justify-content: flex-end;
+}
+
+.navbar-title {
+  min-width: 0;
+  text-align: center;
+  padding: 5px 0;
+}
+
+.navbar-t {
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.navbar-s {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.navbar-project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: 12px;
+  color: var(--accent-2);
+  transition: background-color 0.15s;
+}
+
+.icon-btn:active {
+  background: var(--bg-3);
+}
+
+.icon-btn.subtle {
+  color: var(--ink-2);
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  min-width: 44px;
+  padding: 0 8px 0 6px;
+  gap: 2px;
+}
+
+.back-badge {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--waiting);
+  color: #1f1006;
+  font: 700 12px/20px var(--font-display);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- status dots ---- */
+
+.dot {
+  --c: var(--idle);
+  position: relative;
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+.dot-waiting {
+  --c: var(--waiting);
+  box-shadow: 0 0 0 3.5px var(--waiting-wash);
+}
+
+.dot-running {
+  --c: var(--running);
+}
+
+.dot-running::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  border: 1.5px solid var(--running);
+  animation: ping 1.9s var(--ease-out) infinite;
+}
+
+.dot-unread {
+  --c: var(--unread);
+}
+
+/* Seen sessions: a ring, so the state doesn't hang on colour alone. */
+.dot-idle {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--idle);
+}
+
+@keyframes ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  75%,
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+.spinner {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  color: inherit;
+}
+
+.spinner > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  opacity: 0.75;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- buttons and fields ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 18px;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  text-align: center;
+  transition:
+    transform 0.14s var(--ease-out),
+    background-color 0.15s,
+    opacity 0.15s;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  opacity: 0.42;
+}
+
+.btn[aria-busy="true"] {
+  opacity: 1;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn-primary:active:not(:disabled) {
+  background: var(--accent-press);
+}
+
+.btn-secondary {
+  background: var(--bg-3);
+  color: var(--ink);
+}
+
+.btn-secondary:active:not(:disabled) {
+  background: var(--bg-4);
+}
+
+.btn-quiet {
+  color: var(--accent-2);
+}
+
+.btn.wide {
+  width: 100%;
+}
+
+.link-btn {
+  min-height: 44px;
+  padding: 0 6px;
+  color: var(--accent-2);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.link-btn.quiet {
+  color: var(--ink-2);
+}
+
+.link-btn.danger {
+  color: var(--danger);
+}
+
+.link-btn:disabled {
+  opacity: 0.4;
+}
+
+.pill-btn {
+  flex: none;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pill-btn:active {
+  background: var(--bg-4);
+}
+
+.field {
+  display: block;
+  width: 100%;
+  min-height: 46px;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: var(--bg-3);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.35;
+  -webkit-appearance: none;
+  appearance: none;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
+}
+
+.field::placeholder {
+  color: var(--ink-3);
+}
+
+.field:focus {
+  border-color: var(--accent);
+  background: var(--bg-2);
+}
+
+.field:disabled {
+  opacity: 0.55;
+}
+
+.fine {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+/* ---- connection banner ---- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+  padding: 12px 8px 12px 14px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  box-shadow: inset 0 0 0 0.5px var(--line-2);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.session .banner {
+  margin: 10px calc(var(--gutter) + var(--sar)) 0 calc(var(--gutter) + var(--sal));
+}
+
+.banner.delayed {
+  animation: banner-late 0.25s ease-out 0.8s both;
+}
+
+@keyframes banner-late {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.banner-icon {
+  flex: none;
+  color: var(--ink-2);
+}
+
+.banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.banner-text strong {
+  font-weight: 600;
+}
+
+.banner-text span {
+  color: var(--ink-2);
+}
+
+.banner-error {
+  background: var(--danger-wash);
+  box-shadow: none;
+}
+
+.banner-btn {
+  flex: none;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--accent-2);
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.banner-btn:active {
+  background: var(--bg-3);
+}
+
+/* ---- action sheet ---- */
+
+.sheet-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 0 calc(8px + var(--sar)) calc(8px + var(--sab)) calc(8px + var(--sal));
+  background: var(--scrim);
+  animation: fade-in 0.2s ease-out both;
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  animation: sheet-up 0.34s var(--ease-out) both;
+}
+
+.sheet-group,
+.sheet-cancel {
+  border-radius: 16px;
+  background: var(--bg-2);
+  box-shadow: var(--sheet-shadow);
+  overflow: hidden;
+}
+
+.sheet-head {
+  padding: 14px 18px 12px;
+  text-align: center;
+}
+
+.sheet-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.sheet-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-action {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 0 20px;
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.sheet-action::before,
+.sheet-head + .sheet-action::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 0.5px;
+  background: var(--line);
+}
+
+.sheet-group > .sheet-action:first-child::before {
+  display: none;
+}
+
+.sheet-action:active,
+.sheet-cancel:active {
+  background: var(--bg-3);
+}
+
+.sheet-action.accent {
+  color: var(--accent-2);
+}
+
+.sheet-action.danger {
+  color: var(--danger);
+}
+
+.sheet-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  color: inherit;
+  opacity: 0.85;
+}
+
+.sheet-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-check {
+  color: var(--accent-2);
+}
+
+.sheet-cancel {
+  min-height: 56px;
+  font-size: 17px;
+  font-weight: 600;
+  text-align: center;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translate3d(0, 110%, 0);
+  }
+}
+
+/* ---- toasts: a capsule that drops from under the status bar ---- */
+
+.toasts {
+  position: absolute;
+  z-index: 50;
+  top: calc(var(--sat) + 8px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  padding: 0 16px;
+}
+
+.toast {
+  max-width: 100%;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: #0d0e10;
+  color: #f2ece2;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  animation: toast-in 0.42s var(--ease-out) both;
+}
+
+.toast-success::before,
+.toast-error::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 8px 1px 0;
+  border-radius: 50%;
+  background: var(--unread);
+  vertical-align: middle;
+}
+
+.toast-error::before {
+  background: var(--danger);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -16px, 0) scale(0.92);
+  }
+}
+
+/* ---- skeletons ---- */
+
+.skeleton .sk-line,
+.skeleton .sk-dot,
+.skeleton .sk-bubble,
+.skeleton .sk-tool {
+  border-radius: 7px;
+  background: var(--bg-3);
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+.sk-line {
+  height: 12px;
+  margin: 8px 0;
+}
+
+.sk-line.tall {
+  height: 18px;
+}
+
+.sk-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50% !important;
+  flex: none;
+}
+
+.w40 {
+  width: 40%;
+}
+
+.w60 {
+  width: 60%;
+}
+
+.w70 {
+  width: 70%;
+}
+
+.w80 {
+  width: 80%;
+}
+
+.w90 {
+  width: 90%;
+}
+
+@keyframes shimmer {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ---- notices ---- */
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 14px 16px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  box-shadow: inset 0 0 0 0.5px var(--line-2);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.notice > .icon {
+  margin-top: 1px;
+  color: var(--waiting-ink);
+}
+
+.notice > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.notice strong {
+  font-weight: 600;
+}
+
+.notice span {
+  color: var(--ink-2);
+}
+
+.notice-error {
+  background: var(--danger-wash);
+  box-shadow: none;
+}
+
+.notice-error strong {
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen,
+  .frame[data-nav="push"] .screen,
+  .frame[data-nav="pop"] .screen {
+    animation: screen-fade 0.18s ease-out both;
+  }
+  .sheet,
+  .toast {
+    animation-name: fade-in;
+  }
+  .dot-running::after {
+    animation: none;
+    opacity: 0;
+  }
+  .spinner > span {
+    animation-duration: 1.6s;
+  }
+  .skeleton * {
+    animation: none !important;
+  }
+}

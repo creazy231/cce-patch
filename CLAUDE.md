@@ -10,6 +10,7 @@ A patcher script (`patch.ts`) that modifies the Claude Code VS Code extension to
 - **Include Selection default off** — the open file / selected lines are not attached to prompts unless you opt in, per session (dimmed chip in the input footer, click to attach)
 - **Reasoning effort default max** — sets effort to "max" on every new session
 - **Drafts kept per session** — text, @-mentions and attachments you haven't sent survive switching sessions; an existing session's text also survives a window reload (2.1.300+ keeps text and attachments itself; the patch adds the rest)
+- **Phone remote** — a **Connection** tab next to Local and Web in the sessions panel connects the Mac to Tailscale, so the CCE Remote web app (`remote-app/`) can list every open window's sessions, mirror them live, answer their prompts and send messages from a phone. The bridge (`remote-bridge/`) is copied into the extension as `cce-remote/` and hooked into `extension.js`; it stays off until "Connect with Tailscale"
 
 It auto-detects and patches all installed editors (VS Code, VS Code Insiders, Cursor, VSCodium).
 
@@ -27,19 +28,28 @@ bun run patch.ts --revert
 # Patch without touching the button
 bun run patch.ts --no-commit-button
 
+# Patch without the phone remote (no hook, no cce-remote/, no Connection tab)
+bun run patch.ts --no-remote
+
 # Alternative with Node.js
 npx tsx patch.ts
 npx tsx patch.ts --revert
 
 # claude-commit tests
 bun test claude-commit/test
+
+# phone remote tests: the bridge and the patch hooks, then the web app (npm ci first: its tests use its dependencies)
+bun test remote-bridge/test
+(cd remote-app && npm ci && bun test test && npm run build)
 ```
+
+To try the patch without touching the installed editors, run it with `HOME` pointing at a scratch folder that holds copies of the extension (`<scratch>/.vscode-insiders/extensions/anthropic.claude-code-<version>-darwin-arm64/` with `extension.js`, `webview/index.js`, `webview/index.css`, `package.json`): `HOME=<scratch> bun run patch.ts --no-commit-button`.
 
 After patching, restart each editor with `Reload Window`. The commit button's move into the commit message box needs a full restart (`argv.json`).
 
 ## Architecture
 
-The entire patcher is a single file: `patch.ts`. No build step, no dependencies beyond the runtime.
+The patcher is a single file, `patch.ts`; the phone remote's hooks live in `remote-bridge/install.ts`, which it imports (as it imports `claude-commit/install.ts`). No build step, no dependencies beyond the runtime.
 
 ### Patch pipeline (executed per editor)
 
@@ -53,6 +63,11 @@ The entire patcher is a single file: `patch.ts`. No build step, no dependencies 
 8. **`patchWebviewCss`** — Restyles the dropdown as a fixed sidebar, hides the overlay, makes the body a horizontal flex container. **`patchSessionsPanelCss`** adds the VS Code look (theme tokens only, scoped to the panel so the Session Manager view keeps its upstream style) and the resize handle's style
 9. **`patchStatusDotsCss`** — Appends dot color/animation CSS
 10. **`patchSelectionCss`** — Appends the dimmed (not attached) selection chip style
+11. **`patchExtensionRemote`** (`remote-bridge/install.ts`, like 12–13) — The webview provider (one per window) is the class with the field `allComms=new Set`, unique in `extension.js`. The field becomes `allComms=(function(p){try{require("./cce-remote/bridge.js").attach(p)}catch(e){…console.error…}})(this)||new Set`: the initializer hands the provider to the bridge while it's constructed (the bridge defers its work), and a missing or failing bridge is only logged. **`installRemoteBridge`** then copies `remote-bridge/bridge.js`, the `.js` files under `lib/` and licence files to `<ext>/cce-remote/` (old copy removed first; plain files only, no symlinks; nothing without a `bridge.js`)
+12. **`patchWebviewConnection`** — In `webview/index.js`: both app roots (`X.createRoot(document.querySelector("#root")).render(…{sessions:S…`, chat and Session Manager) become `(window.__cceRemote&&window.__cceRemote.attach(S),X).createRoot(…` (only after `{ , ; )`, so the parenthesis can't turn into a call). In the sessions list: `[__cceConn,__cceSetConn]=useState(!1)` next to its `[TAB,SET]=useState("local")` (picked by the setter the tab buttons call: the MCP server form has a `"local"` state too); the Local/Web row renders for every login (`cce-no-web` hides Web where upstream hid the row), gets `cce-conn-on` while open, closes Connection on a click on another tab (`onClickCapture`), and a third button **Connection**; the list content ``JSX("div",{id:…,className:`${CSS.content} …`,…})`` becomes `__cceConn?JSX("div",{className:CSS.content+" cce-conn",ref:window.__cceRemote.mount},"cce-conn"):…` (keyed, so React mounts a fresh element instead of reusing the list's), and the list root gets `cce-conn-root`. The tab is all or nothing, and only where its state is in scope: the root, the row and the content must sit after the declaration in the block that declares it (bracket-matched by a scanner that skips strings, templates, comments and regex literals), else a `FAIL` line; every read of `__cceConn` and call of `__cceSetConn` is also guarded with `typeof`, so an undeclared name reads as closed instead of throwing (a throw while rendering takes Claude Code's whole view down). The attach is separate, and `Connection runtime attached` fails unless every app root found is hooked. `remote-bridge/webview-runtime.js` is **prepended**: the app boots synchronously at the end of the bundle, and the attach hooks run right then
+13. **`patchConnectionCss`** — The tab row's states on the sessions-list module's hashed classes (`cce-conn-on`: Local/Web lose their highlight; `cce-no-web`: no Web tab; `cce-conn-root`: no search row), plus the Connection view's `cce-conn-*` styles (VS Code theme tokens only)
+
+Verify lines for 11–13: `remote bridge hook (extension.js)`, `remote bridge files` (reported apart from the bundle-shape FAILs: it means `remote-bridge/bridge.js` is missing), `Connection tab`, `Connection runtime attached`. `--revert` also deletes `cce-remote/` and, when `~/.cce-remote/state.json` says remote access is on, turns it off there (`enabled:false`) and turns `tailscale serve` off for the bridge's port (`turnRemoteAccessOff` in `install.ts`; 20 s at most, prints the command when it can't; the folder with the pairings stays; with remote access off it doesn't look at serve); `--no-remote` skips 11–13 and deletes a `cce-remote/` left from an earlier run.
 
 After all editors: **`installCommitButton`** (from `claude-commit/install.ts`) installs the commit message button into the same editors, matched by label. It runs even if a patch failed and skips editors whose installed copy is identical *and* still listed in `extensions.json` (an uninstall leaves the folder behind). With `--revert` it uninstalls instead; `--no-commit-button` skips it.
 
@@ -80,3 +95,17 @@ A plain-CommonJS VS Code extension (`cce-patch.claude-commit-message`, no build 
 `scm/inputBox` is a proposed menu (`contribSourceControlInputBoxMenu`). Only `product.json`-allowlisted extensions (just Copilot) or ones named in `--enable-proposed-api` / `argv.json` can use it, and `argv.json` applies after a full restart. The extension reads its runtime `packageJSON.enabledApiProposals` (VS Code empties it when the proposal isn't granted) into the context key `claudeCommit.inputBoxButton`. The `scm/title` button hides itself once the box button is live.
 
 Tests: `bun test claude-commit/test`. To verify end to end without touching a running editor, launch an isolated Insiders: `open -g -n -a "Visual Studio Code - Insiders" --args --user-data-dir=<tmp> --extensions-dir=<tmp> --extensionDevelopmentPath=claude-commit --remote-debugging-port=<port> <repo>`. Dev mode grants the proposal. Then drive the button over the Chrome DevTools Protocol.
+
+## remote-bridge/ and remote-app/ (phone remote)
+
+Design and protocol: `docs/superpowers/specs/2026-11-19-phone-remote-design.md` (the plan next to it pins names and tests).
+
+**`remote-bridge/`** runs inside the Claude Code extension host: plain CommonJS (`"use strict"`, only Node built-ins and `vscode`, no dependencies, no build step; `.gitignore` re-includes its `*.js`). `bridge.js` `attach(provider)` taps every webview's comms (`send`, `fromClient`, `processRequest`: the host↔webview protocol), keeps per-session state, and answers the Connection tab's `cce_remote_*` requests. When turned on, the first window binds `127.0.0.1:47821` and becomes the hub, the other windows join it as peers (`Upgrade: cce-peer`; each side proves with an HMAC-SHA256 challenge–response that it knows the secret in `state.json`, which never goes on the wire, and a window that finds a program on the port that can't prove it pauses and keeps `tailscale serve` off), and `tailscale serve` exposes the hub's `/ws` (phones: `Tailscale-User-Login` of the Mac's own user plus a paired device token) on the tailnet; only the last remaining window, closed on its own (the hub with no peer joined, inside the provider's `shutdownAll()`, 2 s budget), turns serve off, and leaves remote access on for the next start. Quitting with two or more windows open stops them together (the hub still has its peers), so serve stays on, as after a crash, until the next start, a Disconnect or `--revert`. State lives in `~/.cce-remote/state.json` (`$CCE_REMOTE_HOME`; 0600), written only when something changes (on/off, a pairing or removal, the app address); when a phone was last seen stays in the hub's memory, and while remote access is off the window agents mirror no session messages. Modules in `lib/` (window agent, coordinator, hub, `ws.js`, `peer-link.js`, `store.js`, `pairing.js`, `tailscale.js`, `transcript.js`, `answers.js`, `qr.js`, `connection-ui.js`), as laid out in the spec.
+
+Two files belong to the patcher side and are not copied into the extension:
+- **`install.ts`** — patch steps 11–13 above (pure functions, tested on synthetic bundle snippets in `test/fixtures/bundles.ts`, never on extension code), `installRemoteBridge(extDir, srcDir?)`, `removeRemoteBridge(extDir)`, `turnRemoteAccessOff()` (`--revert`: through `lib/store.js` and `lib/tailscale.js`; tests use a temp `CCE_REMOTE_HOME` and the fake Tailscale CLI)
+- **`webview-runtime.js`** — the Connection tab's browser code, `window.__cceRemote = {attach(sessions), mount(el|null), request(type, data)}` (plain ES2019, its one global). `request` goes through `sessions.comms.connection.value.sendRequest({type, ...data})`, which resolves with the host's answer (an unhandled type answers `Unknown request type.`, shown as "the bridge isn't running"). While mounted it polls `cce_remote_status` every 2 s (doubling up to 30 s while it fails), redraws only when the status changed, and keeps the app-address input across redraws. The DOM is built with `createElement` (host data only as text and attributes, never `innerHTML`); keys typed in the view don't bubble to the app's handlers unless a modifier is held. Tested against a small fake DOM and clock (`test/fake-dom.ts`)
+
+Tests: `bun test remote-bridge/test` (fake provider and comms, real sockets on random ports, a fake Tailscale CLI through `CCE_REMOTE_TAILSCALE`, `CCE_REMOTE_PORT` for the hub port). Never run `tailscale serve`/`up`/`down` against a real tailnet from tests.
+
+**`remote-app/`** is "CCE Remote", the phone side: a Vite + Preact + TypeScript home-screen web app (exact-pinned dependencies and a lockfile, nothing loaded from third-party origins at runtime) that pairs with a Mac through the Connection tab's code, QR code or link and then talks to its hub over `wss://<mac>.<tailnet>.ts.net:47821/ws`. Built to static files and served by nginx from a Dockerfile on the user's own host, which is inside the trust boundary (it serves the code that holds the device token); both base images are pinned to exact versions, and `CCE_REMOTE_TAILNET` (checked at container start) narrows the CSP's `connect-src` to one tailnet. Only `bad_token`, `bad_origin` and `revoked` make the app stop and ask to pair again; other errors show while it keeps retrying. Tests: `cd remote-app && npm ci && bun test test` (`npm run build` type-checks and builds).

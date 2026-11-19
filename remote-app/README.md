@@ -1,0 +1,86 @@
+# CCE Remote
+
+A home-screen web app for your iPhone that follows and controls the Claude Code sessions running in VS Code on your Mac. It shows every open VS Code window with the patched Claude Code as a project, with its sessions and their live state: needs you, running, done, idle. Open a session to read along while Claude works, answer its permission prompts, questions and plan approvals, send messages and photos, start new sessions, or stop a turn.
+
+The phone talks to your Mac directly, over Tailscale. The server that hosts this app only serves its files: your sessions never pass through it.
+
+## How it works
+
+```
+iPhone (CCE Remote, from your server)
+   │  wss://<mac>.<tailnet>.ts.net:47821/ws   (inside your tailnet)
+   ▼
+tailscale serve (HTTPS)  →  the bridge in the patched Claude Code extension on the Mac
+```
+
+The Mac side is part of the patch in this repository (`patch.ts` installs it). It stays off until you turn it on in the **Connection** tab of the Claude Code sessions panel.
+
+## Trust model
+
+**The host of this app is inside your trust boundary.** The phone runs whatever code the host serves, keeps the device token in the app's storage, and sits on your tailnet. Whoever can change the files this server serves (the server, its admin panel, a poisoned build dependency) can act as your paired phone and drive Claude Code on your Mac, which can run commands. To keep that surface small:
+
+- The four runtime libraries (`preact`, `marked`, `dompurify`, `jsqr`) and the build tools are pinned to exact versions with a lockfile, and the image builds with `npm ci`.
+- Nothing is loaded from third-party origins at runtime: no CDN, no web fonts, no analytics.
+- A strict Content Security Policy (below) only allows the app's own files and connections to `*.ts.net`, or only to your own tailnet with `CCE_REMOTE_TAILNET`.
+- The Docker base images are pinned to exact versions, like the dependencies.
+- Messages are rendered as sanitised Markdown; links only open outside the app.
+
+A stronger setup for later: let the bridge on the Mac serve the built app itself on its `tailscale serve` address, so no other server is involved.
+
+## Pairing
+
+1. On the Mac: apply the patch (`bun run patch.ts`), reload VS Code, open the Claude Code sessions panel, choose **Connection** and click **Connect with Tailscale**. The tab shows a QR code, a link and a one-time code (valid for 10 minutes).
+2. On the iPhone, with Tailscale on: open this app's address in Safari, then **Share → Add to Home Screen**.
+3. Open **CCE Remote** from the Home Screen and pair: **Scan the QR code**, **Paste the link** (after "Copy link" on the Mac), or **Enter address and code**.
+
+Pair inside the Home Screen app. On iOS, a Home Screen app has its own storage, separate from Safari: a pairing made in Safari doesn't carry over. If you scan the QR code with the Camera app, the link opens in Safari, and the app asks you to add it to the Home Screen first.
+
+After pairing the phone reconnects by itself. You can pair several Macs and switch between them on the Home screen. Remove a pairing in **Settings**, or remove the phone in the Mac's Connection tab.
+
+If the app can't reach the Mac, check that Tailscale is on on the phone and that the Connection tab says it's connected.
+
+## Hosting on Coolify
+
+The app is a static build served by nginx (see `Dockerfile` and `nginx.conf`; the Dockerfile says how to move its pinned base images to newer versions).
+
+1. New resource → your repository → build pack **Dockerfile**.
+2. Base directory: `remote-app`. Dockerfile location: `/Dockerfile`.
+3. Port: `80` (the container's health check calls `/`).
+4. Set a domain with HTTPS (Coolify's proxy gets the certificate). The phone needs HTTPS: Safari blocks a secure page's connections to non-secure addresses, and the Mac is reached over `wss://`.
+5. Optional: set the environment variable `CCE_REMOTE_TAILNET` to your tailnet's DNS name (e.g. `tailnet-0000.ts.net`; Tailscale's admin console shows it under **DNS**). The app may then connect only to Macs in that tailnet; the default, `ts.net`, allows any tailnet. A value that isn't a DNS name stops the container at start, with a line saying so in its log.
+6. Deploy, open the domain on the iPhone, add it to the Home Screen.
+
+Optionally enter the app's address in the Mac's Connection tab (**Phone app address**), so the QR code opens the app directly.
+
+nginx serves every response with:
+
+- `Content-Security-Policy: default-src 'self'; connect-src 'self' wss://*.ts.net:* https://*.ts.net:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'` (with `CCE_REMOTE_TAILNET=tailnet-0000.ts.net`, connect-src is `'self' wss://*.tailnet-0000.ts.net:* https://*.tailnet-0000.ts.net:*`)
+- `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(self)` (for the QR scanner)
+- `Cache-Control: no-cache` for `index.html`, `sw.js` and the manifest; a year, immutable, for `/assets/`.
+
+A service worker keeps the app shell available offline and refreshes it on the next start after a deploy.
+
+## Development
+
+```bash
+cd remote-app
+npm ci
+npm run dev            # http://localhost:5173/?demo
+npm test               # bun test test
+npm run build          # type-check + production build into dist/
+npm run preview        # serve dist/ on http://localhost:4173
+docker build -t cce-remote .          # the production image (nginx on port 80)
+docker run --rm -p 8080:80 -e CCE_REMOTE_TAILNET=tailnet-0000.ts.net cce-remote   # http://localhost:8080
+```
+
+`?demo` runs the whole app on built-in, made-up data with no network: a pretend Mac with three windows and sessions in every state, including each kind of prompt. Useful deep links: `?demo&session=demo-session-invoices` (a permission prompt), `demo-session-datepicker` (questions), `demo-session-router` (a plan), `demo-session-exports` (a dialog), `demo-session-ratelimit` (running), `?demo&screen=pair`, `?demo&screen=settings`, and `&inset=59,34` to fake an iPhone's safe areas on a desktop browser.
+
+For a local bridge, `http://localhost` and `http://127.0.0.1` addresses are accepted when entered by hand; everything else must be `https://`.
+
+## Files
+
+- `src/lib/`: the protocol client, pairing, storage of paired Macs, the transcript view model, image downscaling, demo data (tested with `bun test`).
+- `src/state/`: the app's store, the demo source, question answers, text helpers.
+- `src/components/`: the screens (Home, Session, Pair, Settings) and their parts.
+- `src/styles/`: design tokens and styles (dark by default, light when the system is light).
+- `public/`: the manifest, the service worker and the icons.
