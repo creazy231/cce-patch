@@ -46,6 +46,7 @@ body::before {
   height: var(--app-h, 100dvh);
   transform: translate3d(0, var(--app-top, 0px), 0);
   overflow: hidden;
+  background: var(--bg);
 }
 
 .frame {

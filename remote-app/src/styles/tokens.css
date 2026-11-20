@@ -50,8 +50,9 @@
   --chip: rgba(239, 233, 222, 0.08);
   --code-bg: #101114;
 
-  /* white status-bar text (black-translucent) sits on this band; transparent in dark mode */
-  --statusbar: transparent;
+  /* white status-bar text (black-translucent) sits on this band; the navbar's colour in dark mode, so the
+     top edge is solid and iOS doesn't blur what is under the status bar */
+  --statusbar: var(--bg);
   --scrim: rgba(5, 6, 8, 0.6);
   --ember: rgba(249, 115, 22, 0.2);
   --ember-2: rgba(236, 138, 76, 0.07);
