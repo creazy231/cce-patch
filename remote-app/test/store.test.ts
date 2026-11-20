@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { RemoteError, type ClientEvents, type ClientState } from "../src/lib/client";
 import { saveMacs, selectMac, type Mac } from "../src/lib/macs";
-import type { Ack, ImageUpload, Pending, PhoneMessage, Project } from "../src/lib/protocol";
+import type { Ack, ImageUpload, Pending, PhoneMessage, Project, SessionSummary } from "../src/lib/protocol";
+import { isNew } from "../src/lib/readstate";
 import { ensureVapidKeys, setBadgeCount, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
 import { buildTranscript } from "../src/lib/transcript";
 import type { Source } from "../src/state/source";
@@ -1019,5 +1020,126 @@ describe("the badge when Macs go away", () => {
     await flush();
     expect(push.caches.map("cce-badge")).toEqual({ "": 5 });
     expect(push.cleared()).toBe(cleared);
+  });
+});
+
+// ---- what is new on this phone (read state, in the Mac's clock) ----
+
+describe("new on this phone", () => {
+  let phoneNow = 0;
+  const projectsWith = (lastModified: number, state: SessionSummary["state"] = "idle"): Project[] => [
+    {
+      id: PROJECT,
+      name: "acme",
+      folders: ["~/acme"],
+      editor: "Visual Studio Code",
+      claudeOpen: true,
+      sessions: [{ id: SESSION, title: "Fix it", lastModified, state, live: true, pendingCount: 0 }],
+    },
+  ];
+  const visible = (on: boolean) => {
+    (document as unknown as { visibilityState: string }).visibilityState = on ? "visible" : "hidden";
+    fireDocument("visibilitychange");
+  };
+  const s1 = () => store.state.projects[0]!.sessions[0]!;
+  const welcomeAt = (now: number) => fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" }, now });
+
+  /** A store with Macs A (selected) and B, on the phone clock `phoneNow`. */
+  function readStore() {
+    saveMacs([MAC_A, MAC_B], localStorage);
+    selectMac(MAC_A.id, localStorage);
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: false, createSource: () => fake, pushEnv: fakePushEnv().env, now: () => phoneNow });
+    store.start();
+  }
+
+  test("the first projects set the baseline: nothing is new", () => {
+    phoneNow = 50_000;
+    readStore();
+    welcomeAt(50_000);
+    fake.emit("projects", projectsWith(49_000));
+    expect(store.state.read?.baseline).toBe(50_000);
+    expect(isNew(s1(), store.state.read)).toBe(false);
+  });
+
+  test("activity after the baseline makes a session new; viewing it clears it", () => {
+    phoneNow = 50_000;
+    readStore();
+    welcomeAt(50_000);
+    fake.emit("projects", projectsWith(49_000));
+    fake.emit("projects", projectsWith(60_000));
+    expect(isNew(s1(), store.state.read)).toBe(true);
+    visible(true);
+    phoneNow = 61_000;
+    store.openSession(PROJECT, SESSION);
+    snapshot([said("m1", "first")]);
+    fake.emit("projects", projectsWith(60_500));
+    expect(isNew(s1(), store.state.read)).toBe(false);
+    phoneNow = 62_000;
+    store.navigate({ name: "home" });
+    expect(store.state.read?.seen[SESSION]).toBe(62_000);
+    fake.emit("projects", projectsWith(63_000));
+    expect(isNew(s1(), store.state.read)).toBe(false);
+    fake.emit("projects", projectsWith(64_001));
+    expect(isNew(s1(), store.state.read)).toBe(true);
+  });
+
+  test("seen is kept up to the moment the session stops showing", () => {
+    phoneNow = 50_000;
+    readStore();
+    welcomeAt(50_000);
+    fake.emit("projects", projectsWith(49_000));
+    visible(true);
+    store.openSession(PROJECT, SESSION);
+    snapshot([said("m1", "first")]);
+    phoneNow = 70_000;
+    visible(false);
+    expect(store.state.read?.seen[SESSION]).toBe(70_000);
+    phoneNow = 75_000;
+    fake.emit("msg", { t: "msg", project: PROJECT, session: SESSION, message: said("m2", "while hidden") });
+    expect(store.state.read?.seen[SESSION]).toBe(70_000);
+    visible(true);
+    expect(store.state.read?.seen[SESSION]).toBe(75_000);
+    phoneNow = 80_000;
+    fake.emit("state", "offline");
+    expect(store.state.read?.seen[SESSION]).toBe(80_000);
+  });
+
+  test("a phone clock that runs ahead", () => {
+    phoneNow = 1_600_000;
+    readStore();
+    welcomeAt(1_000_000);
+    fake.emit("projects", projectsWith(900_000));
+    expect(store.state.read?.baseline).toBe(1_000_000);
+    expect(store.macNow()).toBe(1_000_000);
+    fake.emit("projects", projectsWith(1_060_000));
+    expect(isNew(s1(), store.state.read)).toBe(true);
+  });
+
+  test("each Mac has its own read state", () => {
+    phoneNow = 50_000;
+    readStore();
+    welcomeAt(50_000);
+    fake.emit("projects", projectsWith(49_000));
+    expect(store.state.read?.baseline).toBe(50_000);
+    phoneNow = 90_000;
+    store.switchMac(MAC_B.id);
+    expect(store.state.read).toBeNull();
+    welcomeAt(90_000);
+    fake.emit("projects", projectsWith(89_000));
+    expect(store.state.read?.baseline).toBe(90_000);
+    store.switchMac(MAC_A.id);
+    expect(store.state.read?.baseline).toBe(50_000);
+    store.removeMac(MAC_A.id);
+    expect(localStorage.getItem("cce-remote:read:a")).toBeNull();
+    expect(localStorage.getItem("cce-remote:read:b")).not.toBeNull();
+  });
+
+  test("the demo keeps read state in memory only", () => {
+    fake.emit("projects", projectsWith(49_000));
+    expect(store.state.read).not.toBeNull();
+    const keys = [...(localStorage as unknown as { data: Map<string, string> }).data.keys()];
+    expect(keys.filter((key) => key.startsWith("cce-remote:read:"))).toEqual([]);
   });
 });

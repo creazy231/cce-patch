@@ -4,6 +4,7 @@
 import { RemoteClient, RemoteError, pairWithMac, type ClientState } from "../lib/client";
 import { loadMacs, removeMac as forgetMac, selectMac, selectedMacId, upsertMac, type Mac } from "../lib/macs";
 import { defaultDeviceName, parsePairingInput, type PairingInput } from "../lib/pairing";
+import { forgetReadState, loadReadState, markSeen, saveReadState, type ReadState } from "../lib/readstate";
 import {
   currentSetup,
   isPushOn,
@@ -140,6 +141,8 @@ export interface AppState {
    */
   refusal: { code: string; message: string } | null;
   projects: Project[];
+  /** What this phone has read of the selected Mac's sessions; null until the Mac's first project list (and with no Mac). */
+  read: ReadState | null;
   push: PushState;
   route: Route;
   nav: Nav;
@@ -161,6 +164,8 @@ export interface StoreOptions {
   createSource?: (mac: Mac, demo: boolean) => Source;
   /** The browser's push APIs (tests); the real ones by default. */
   pushEnv?: PushEnv;
+  /** This phone's clock (tests); Date.now by default. */
+  now?: () => number;
 }
 
 // ---- helpers ------------------------------------------------------------------------------------
@@ -245,6 +250,15 @@ export function isStandalone(): boolean {
   return (navigator as Navigator & { standalone?: boolean }).standalone === true;
 }
 
+/** Whether the page is in front (no document: not). */
+function pageVisible(): boolean {
+  try {
+    return typeof document !== "undefined" && document.visibilityState === "visible";
+  } catch {
+    return false;
+  }
+}
+
 const demoMac = (): Mac => ({ id: DEMO_MAC_ID, name: DEMO_MAC_NAME, url: DEMO_MAC_URL, deviceId: DEMO_MAC_ID, token: "demo" });
 
 // ---- the store ----------------------------------------------------------------------------------
@@ -267,11 +281,16 @@ export class Store {
   private started = false;
   /** The Mac sent an error during the current connection attempt (see AppState.refusal). */
   private refusedThisAttempt = false;
+  /** This phone's clock. */
+  private readonly now: () => number;
+  /** The Mac's clock minus this phone's, from the last welcome (0 without one, or from an older Mac). */
+  private skew = 0;
 
   constructor(options: StoreOptions) {
     this.demoOptions = options.demoOptions;
     this.createSource = options.createSource;
     this.pushEnv = options.pushEnv;
+    this.now = options.now ?? Date.now;
     const macs = options.demo ? [demoMac()] : loadMacs();
     const macId = options.demo ? DEMO_MAC_ID : selectedMacId();
     this.state = {
@@ -282,6 +301,7 @@ export class Store {
       remoteOff: false,
       refusal: null,
       projects: [],
+      read: null,
       push: {
         support: pushSupport(options.pushEnv),
         on: isPushOn(options.pushEnv),
@@ -325,6 +345,11 @@ export class Store {
   /** The name to show for the selected Mac. */
   get macName(): string {
     return this.mac?.name ?? "your Mac";
+  }
+
+  /** The connected Mac's clock as this phone estimates it (from the welcome): what read state and ages are measured in. */
+  macNow(): number {
+    return this.now() + this.skew;
   }
 
   // ---- start and stop ----
@@ -405,7 +430,14 @@ export class Store {
   }
 
   private readonly onVisibility = (): void => {
-    if (document.visibilityState === "visible") this.refreshPushSupport();
+    if (document.visibilityState === "visible") {
+      this.refreshPushSupport();
+      this.noteSeen();
+      return;
+    }
+    // Hidden now: the session on screen was seen until this moment.
+    const shown = this.viewing(false);
+    if (shown) this.markRead(shown);
   };
 
   private readonly onPopState = (event: PopStateEvent): void => {
@@ -425,6 +457,7 @@ export class Store {
   };
 
   private applyRoute(route: Route, nav: Nav): void {
+    if (this.state.route.name === "session") this.noteSeen(); // the session on screen was seen until it goes
     let view = this.state.view;
     const keep = route.name === "session" && view !== null && view.project === route.project && view.session === route.session;
     if (!keep) {
@@ -459,13 +492,14 @@ export class Store {
   private connectTo(id: string | null): void {
     this.dropSource();
     const mac = this.state.macs.find((m) => m.id === id);
+    this.skew = 0;
     if (!mac) {
-      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [] });
+      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [], read: null });
       this.updateBadge();
       this.updatePushBadge(this.state.projects);
       return;
     }
-    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [] });
+    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [], read: this.state.demo ? null : loadReadState(mac.id) });
     this.updateBadge();
     this.updatePushBadge(this.state.projects);
     if (this.createSource) this.useSource(this.createSource(mac, this.state.demo));
@@ -482,6 +516,8 @@ export class Store {
         this.updateBadge();
         this.updatePushBadge(projects);
         this.watchForStartedSession();
+        this.ensureReadState();
+        this.noteSeen();
       }),
       source.on("snapshot", (frame) => this.onSnapshot(frame)),
       source.on("msg", (frame) => this.onMessage(frame)),
@@ -496,6 +532,7 @@ export class Store {
   }
 
   private onState(conn: ClientState): void {
+    if (conn !== "open" && this.state.conn === "open") this.noteSeen(); // what is on screen was seen until the connection went
     if (conn === "open") {
       this.set({ conn, remoteOff: false, refusal: null });
       return;
@@ -533,6 +570,7 @@ export class Store {
    * doesn't keep a dead one until a push to it fails.
    */
   private async onWelcome(frame: WelcomeFrame): Promise<void> {
+    this.skew = typeof frame.now === "number" && Number.isFinite(frame.now) ? frame.now - this.now() : 0;
     if (!this.state.push.on) {
       if (!this.state.demo && frame.push === true) this.clearPushOnMac();
       return;
@@ -698,6 +736,7 @@ export class Store {
         stream: EMPTY_STREAM,
       },
     });
+    this.noteSeen();
   }
 
   private onMessage(frame: MessageFrame): void {
@@ -727,6 +766,7 @@ export class Store {
       messages = messages.slice(-KEEP_MESSAGES);
     }
     this.set({ view: { ...view, messages, outgoing, truncatedBefore, stream: streamAfterMessage(view.stream, message) } });
+    this.noteSeen();
   }
 
   private onStream(frame: StreamFrame): void {
@@ -742,6 +782,7 @@ export class Store {
     const open = new Set(frame.pending.map((p) => p.requestId));
     const keepOpen = <T>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => open.has(id)));
     this.set({ view: { ...view, pending: frame.pending, answering: keepOpen(view.answering), answerErrors: keepOpen(view.answerErrors) } });
+    this.noteSeen();
   }
 
   private onError(frame: ErrorFrame): void {
@@ -1039,6 +1080,7 @@ export class Store {
       return;
     }
     const macs = forgetMac(id);
+    forgetReadState(id);
     this.set({ macs });
     // This Mac's waiting count is gone with it.
     void setBadgeCount(mac.deviceId, 0, this.pushEnv);
@@ -1049,6 +1091,45 @@ export class Store {
       if (!next) this.navigateRoot({ name: "pair" });
     }
     this.toast(`Removed ${mac.name}`, "info");
+  }
+
+  // ---- what this phone has read ----
+
+  /** The selected Mac's first project list starts its read state: everything up to now counts as read. */
+  private ensureReadState(): void {
+    const macId = this.state.macId;
+    if (this.state.read || !macId) return;
+    const read: ReadState = { baseline: this.macNow(), seen: {} };
+    if (!this.state.demo) saveReadState(macId, read);
+    this.set({ read });
+  }
+
+  /**
+   * The session the session screen shows right now, or null: the route is that session, its snapshot is in,
+   * the Mac is connected, and (with `requireVisible`) the page is in front.
+   */
+  private viewing(requireVisible: boolean): string | null {
+    const { route, view, conn } = this.state;
+    if (route.name !== "session" || !view || !view.loaded || view.session !== route.session || conn !== "open") return null;
+    if (requireVisible && !pageVisible()) return null;
+    return route.session;
+  }
+
+  /** The session was on screen until now (the Mac's clock). */
+  private markRead(sessionId: string): void {
+    const read = this.state.read;
+    const macId = this.state.macId;
+    if (!read || !macId) return;
+    const next = markSeen(read, sessionId, this.macNow());
+    if (next === read) return;
+    if (!this.state.demo) saveReadState(macId, next);
+    this.set({ read: next });
+  }
+
+  /** Marks the session on screen as read up to now, if one is. */
+  private noteSeen(): void {
+    const shown = this.viewing(true);
+    if (shown) this.markRead(shown);
   }
 
   // ---- badge and toasts ----
