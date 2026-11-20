@@ -68,16 +68,6 @@ Notifications are end-to-end encrypted: the Mac encrypts each one for this phone
 
 A notification can wait on Apple's push service until the phone is reachable; waiting notifications expire after an hour, finished-session notifications after 10 minutes, and test notifications after a minute. Nothing is sent while remote access is off, while no VS Code window is open, or while the Mac sleeps.
 
-## Read aloud
-
-The phone can read Claude's replies aloud with its own voices; nothing is sent anywhere.
-
-- **Tap to listen.** Tap the speaker under a reply to hear it, and tap again to stop.
-- **Read new replies aloud.** The setting is in the session's ••• menu and in Settings → Read aloud. It reads each new reply as it arrives, while the app is open on that session. Turn on "Questions and permission prompts" as well to hear when Claude waits for you.
-- **What is read.** Only Claude's text: code blocks are left out (with one "code block" mention), as are tool calls and thinking.
-- **Voice and speed.** German replies get a German voice and English replies an English one. You can pick a fixed voice and the speed in Settings.
-- **When it stops.** Reading stops when you leave the session or the app goes to the background. iOS lets speech start only from a tap, so turn the setting on, or tap a speaker once, before relying on new replies being read.
-
 ## Hosting on Coolify
 
 The app is a static build served by nginx (see `Dockerfile` and `nginx.conf`; the Dockerfile says how to move its pinned base images to newer versions).

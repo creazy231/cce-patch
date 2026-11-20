@@ -51,13 +51,6 @@ export const Sliders = icon(
 export const ArrowUp = icon(<path d="M12 19V5M6 11l6-6 6 6" />);
 export const ArrowDown = icon(<path d="M12 5v14M6 13l6 6 6-6" />);
 export const Stop = icon(<rect x="7" y="7" width="10" height="10" rx="2.2" fill="currentColor" stroke="none" />);
-export const SpeakerIcon = icon(
-  <>
-    <path d="M4 9.5h3.2L11.5 6v12l-4.3-3.5H4z" />
-    <path d="M15 9.2a4 4 0 0 1 0 5.6" />
-    <path d="M17.6 6.8a7.4 7.4 0 0 1 0 10.4" />
-  </>,
-);
 export const Photo = icon(
   <>
     <rect x="3" y="5" width="18" height="14" rx="3" />
