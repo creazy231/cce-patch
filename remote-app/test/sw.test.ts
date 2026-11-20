@@ -37,7 +37,7 @@ interface FakeClient {
 }
 
 /** Loads public/sw.js into a fresh context and hands back what the handlers did. */
-function loadWorker() {
+function loadWorker(options: { locks?: { request(name: string, callback: () => Promise<unknown>): Promise<unknown> } } = {}) {
   const listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
   const shown: Array<{ title: string; options: Record<string, unknown> }> = [];
   const badges: number[] = [];
@@ -74,6 +74,7 @@ function loadWorker() {
       async clearAppBadge() {
         badges.push(0);
       },
+      ...(options.locks ? { locks: options.locks } : {}),
     },
     async skipWaiting() {},
   };
@@ -146,6 +147,39 @@ describe("push", () => {
     ]);
     expect(worker.caches.map("cce-badge")).toEqual({ dev1: 2 });
     expect(worker.badges).toEqual([2]);
+  });
+
+  test("badge updates take the cce-badge lock", async () => {
+    const names: string[] = [];
+    let tail: Promise<unknown> = Promise.resolve();
+    let active = 0;
+    let mostAtOnce = 0;
+    const locks = {
+      request(name: string, callback: () => Promise<unknown>) {
+        names.push(name);
+        const run = tail.then(async () => {
+          active++;
+          mostAtOnce = Math.max(mostAtOnce, active);
+          try {
+            return await callback();
+          } finally {
+            active--;
+          }
+        });
+        tail = run.catch(() => {});
+        return run;
+      },
+    };
+    const worker = loadWorker({ locks });
+
+    await Promise.all([
+      worker.dispatch("push", pushWith({ json: () => PAYLOAD })),
+      worker.dispatch("push", pushWith({ json: () => ({ ...PAYLOAD, mac: "dev2", badge: 1 }) })),
+    ]);
+
+    expect(names).toEqual(["cce-badge", "cce-badge"]);
+    expect(mostAtOnce).toBe(1); // one at a time
+    expect(worker.caches.map("cce-badge")).toEqual({ dev1: 2, dev2: 1 });
   });
 
   test("an unreadable push still shows a notification", async () => {

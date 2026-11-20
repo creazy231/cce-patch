@@ -69,11 +69,14 @@ export class RemoteError extends Error {
   readonly code: string;
   /** push_test: the push service's HTTP status, when the Mac got one. */
   readonly status?: number;
-  constructor(code: string, message = code, status?: number) {
+  /** push_test: why a status-0 failure happened, when the Mac said (refused, too_large, invalid, network, timeout, aborted). */
+  readonly reason?: string;
+  constructor(code: string, message = code, status?: number, reason?: string) {
     super(message);
     this.name = "RemoteError";
     this.code = code;
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -537,7 +540,15 @@ export class RemoteClient {
     this.acks.delete(ack.id);
     this.timers.clearTimeout(pending.timer);
     if (ack.ok) pending.resolve(ack);
-    else pending.reject(new RemoteError(ack.error || "failed", ack.error || "failed", typeof ack.status === "number" ? ack.status : undefined));
+    else
+      pending.reject(
+        new RemoteError(
+          ack.error || "failed",
+          ack.error || "failed",
+          typeof ack.status === "number" ? ack.status : undefined,
+          typeof ack.reason === "string" ? ack.reason : undefined,
+        ),
+      );
   }
 
   // ---- outgoing ----

@@ -909,6 +909,15 @@ describe("notifications", () => {
     expect(store.state.toasts.at(-1)?.text).toBe("Notifications were turned off on this iPhone");
   });
 
+  test("a test that couldn't reach the push service says why", async () => {
+    await pushStore({ on: true, subscription: true });
+    const sending = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_failed", "push_failed", 0, "timeout"));
+    await sending;
+    expect(store.state.toasts.at(-1)).toMatchObject({ text: "Couldn't reach the push service (timeout).", tone: "error" });
+  });
+
   test("a link opens the session on its Mac", () => {
     linkedStore();
     expect(store.state.macId).toBe("a");

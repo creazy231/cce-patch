@@ -650,8 +650,13 @@ export class Store {
         this.set({ push: { ...this.state.push, on: false, mac: "unknown", error: null } });
         this.toast("Notifications were turned off on this iPhone", "info");
       } else if (code === "push_failed") {
+        const reason = error instanceof RemoteError ? error.reason : undefined;
         this.toast(
-          status !== undefined ? `The push service didn't accept the test notification (status ${status}).` : "The push service didn't accept the test notification.",
+          status === 0 && reason
+            ? `Couldn't reach the push service (${reason}).`
+            : status !== undefined
+              ? `The push service didn't accept the test notification (status ${status}).`
+              : "The push service didn't accept the test notification.",
           "error",
         );
       } else if (code === "demo") {

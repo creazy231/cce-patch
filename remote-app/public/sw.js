@@ -97,7 +97,7 @@ function cut(value, max) {
 
 /** Keeps the waiting count per Mac and returns their sum, or null when the cache is unavailable. */
 async function updateBadge(mac, count) {
-  try {
+  const update = async () => {
     const cache = await caches.open(BADGE_CACHE);
     const hit = await cache.match(BADGE_PATH);
     let stored = {};
@@ -119,6 +119,12 @@ async function updateBadge(mac, count) {
     let sum = 0;
     for (const value of Object.values(map)) sum += value;
     return sum;
+  };
+  try {
+    // The same lock name as the page's setBadgeCount: the two take turns on the badge cache.
+    const locks = self.navigator && self.navigator.locks;
+    if (locks && typeof locks.request === "function") return await locks.request(BADGE_CACHE, update);
+    return await update();
   } catch {
     return null;
   }

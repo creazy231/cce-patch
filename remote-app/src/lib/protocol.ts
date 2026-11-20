@@ -149,6 +149,8 @@ export interface Ack {
   error?: string;
   /** push_test: the push service's HTTP status, when the Mac got one. */
   status?: number;
+  /** push_test: why a status-0 failure happened (refused, too_large, invalid, network, timeout, aborted). */
+  reason?: string;
   /** send: the session the message went to (the new one for a new session). */
   session?: string;
   /** send: the uuid of the user message the bridge injected; the CLI replays it with `isReplay`. */

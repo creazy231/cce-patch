@@ -103,6 +103,7 @@ interface FakeOptions {
   crypto?: PushEnv["crypto"];
   storage?: StorageLike;
   caches?: PushEnv["caches"];
+  locks?: PushEnv["navigator"]["locks"];
   setAppBadge?: (count: number) => Promise<void>;
   clearAppBadge?: () => Promise<void>;
 }
@@ -116,13 +117,14 @@ function fakeEnv(options: FakeOptions = {}): PushEnv {
     },
   };
   const navigator = options.noServiceWorker
-    ? { setAppBadge: options.setAppBadge, clearAppBadge: options.clearAppBadge }
+    ? { setAppBadge: options.setAppBadge, clearAppBadge: options.clearAppBadge, ...(options.locks ? { locks: options.locks } : {}) }
     : {
         serviceWorker: {
           ready: options.readyHangs ? new Promise<never>(() => {}) : Promise.resolve(registration),
         },
         setAppBadge: options.setAppBadge,
         clearAppBadge: options.clearAppBadge,
+        ...(options.locks ? { locks: options.locks } : {}),
       };
   return {
     navigator: navigator as PushEnv["navigator"],
@@ -280,6 +282,31 @@ describe("ensureVapidKeys", () => {
     expect(keys.privateJwk.d).toBeTruthy();
   });
 
+  test("keys survive a storage that refuses writes", async () => {
+    const storage: StorageLike = {
+      getItem() {
+        return null;
+      },
+      setItem() {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem() {
+        // nothing stored anyway
+      },
+    };
+    const env = fakeEnv({ storage });
+    const keys = await ensureVapidKeys(env);
+    const subscription = new FakeSubscription(decodeBase64Url(keys.publicKey));
+    env.navigator.serviceWorker = {
+      ready: Promise.resolve({ pushManager: { getSubscription: async () => subscription, subscribe: async () => subscription } }),
+    };
+
+    const setup = await currentSetup(PREFS, env);
+    expect(setup).not.toBeNull();
+    expect(setup!.vapid).toEqual(keys);
+    expect(setup!.subscription.endpoint).toBe("https://push.example/abc");
+  });
+
   test("concurrent calls make one key pair", async () => {
     const log: string[] = [];
     const { env } = recordingEnv(log);
@@ -424,6 +451,37 @@ describe("setBadgeCount", () => {
     await setBadgeCount("b", 0, env);
     expect(caches.map("cce-badge")).toEqual({});
     expect(cleared).toBe(1);
+  });
+
+  test("badge updates take the cce-badge lock", async () => {
+    const caches = new FakeCaches();
+    const names: string[] = [];
+    let tail: Promise<unknown> = Promise.resolve();
+    let active = 0;
+    let mostAtOnce = 0;
+    const locks = {
+      request(name: string, callback: () => Promise<unknown>) {
+        names.push(name);
+        const run = tail.then(async () => {
+          active++;
+          mostAtOnce = Math.max(mostAtOnce, active);
+          try {
+            return await callback();
+          } finally {
+            active--;
+          }
+        });
+        tail = run.catch(() => {});
+        return run;
+      },
+    };
+    const env = fakeEnv({ caches: caches as unknown as PushEnv["caches"], locks });
+
+    await Promise.all([setBadgeCount("a", 2, env), setBadgeCount("b", 1, env)]);
+
+    expect(names).toEqual(["cce-badge", "cce-badge"]);
+    expect(mostAtOnce).toBe(1); // one at a time
+    expect(caches.map("cce-badge")).toEqual({ a: 2, b: 1 });
   });
 
   test("a throwing caches does not throw", async () => {

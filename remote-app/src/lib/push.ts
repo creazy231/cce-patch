@@ -53,6 +53,8 @@ export interface PushNavigator {
   serviceWorker?: { ready: Promise<PushRegistration> };
   setAppBadge?(count: number): Promise<void> | void;
   clearAppBadge?(): Promise<void> | void;
+  /** Web Locks: the page and the service worker take turns on the badge cache (lock name cce-badge). */
+  locks?: { request(name: string, callback: () => Promise<unknown>): Promise<unknown> };
 }
 
 export interface PushNotification {
@@ -207,20 +209,24 @@ const VAPID_KEY = "cce-remote:vapid";
 /** One key pair being made per storage, so concurrent calls share it. */
 const vapidInFlight = new WeakMap<StorageLike, Promise<PushVapidKeys>>();
 
+/** Keys storage refused to keep, per storage: this run still uses them. */
+const vapidFallback = new WeakMap<StorageLike, PushVapidKeys>();
+
 function loadVapidKeys(env: PushEnv): PushVapidKeys | null {
+  const fallback = vapidFallback.get(env.storage) ?? null;
   try {
     const raw = env.storage.getItem(VAPID_KEY);
-    if (!raw) return null;
+    if (!raw) return fallback;
     const value = JSON.parse(raw) as { publicKey?: unknown; privateJwk?: unknown };
-    if (typeof value?.publicKey !== "string" || !value.privateJwk || typeof value.privateJwk !== "object") return null;
+    if (typeof value?.publicKey !== "string" || !value.privateJwk || typeof value.privateJwk !== "object") return fallback;
     const jwk = value.privateJwk as JsonWebKey;
-    if (typeof jwk.d !== "string" || typeof jwk.x !== "string" || typeof jwk.y !== "string") return null;
+    if (typeof jwk.d !== "string" || typeof jwk.x !== "string" || typeof jwk.y !== "string") return fallback;
     return {
       publicKey: value.publicKey,
       privateJwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d },
     };
   } catch {
-    return null;
+    return fallback;
   }
 }
 
@@ -244,6 +250,7 @@ export async function ensureVapidKeys(env?: PushEnv): Promise<PushVapidKeys> {
       e.storage.setItem(VAPID_KEY, JSON.stringify(keys));
     } catch {
       // Not persisted: these keys work for this run.
+      vapidFallback.set(e.storage, keys);
     }
     return keys;
   })();
@@ -420,13 +427,16 @@ async function applyBadge(navigator: PushNavigator, sum: number): Promise<void> 
 
 /**
  * Keeps the waiting count per Mac in the badge cache and sets the home-screen badge to their sum.
- * Never throws: without Cache Storage there is simply no badge.
+ * The read-modify-write takes the `cce-badge` lock when Web Locks are there, so a page and the
+ * service worker cannot overwrite each other; without them it works as it did. Never throws: without
+ * Cache Storage there is simply no badge.
  */
 export async function setBadgeCount(mac: string, count: number, env?: PushEnv): Promise<void> {
   const e = env ?? defaultPushEnv();
-  try {
-    if (!e.caches) return;
-    const cache = await e.caches.open(BADGE_CACHE);
+  const caches = e.caches;
+  if (!caches) return;
+  const update = async (): Promise<void> => {
+    const cache = await caches.open(BADGE_CACHE);
     const map: Record<string, number> = {};
     const hit = await cache.match(BADGE_PATH);
     if (hit) {
@@ -448,6 +458,11 @@ export async function setBadgeCount(mac: string, count: number, env?: PushEnv): 
     let sum = 0;
     for (const value of Object.values(map)) sum += value;
     await applyBadge(e.navigator, sum);
+  };
+  try {
+    const locks = e.navigator.locks;
+    if (locks && typeof locks.request === "function") await locks.request(BADGE_CACHE, update);
+    else await update();
   } catch {
     // Cache Storage failed: the badge stays as it was.
   }
