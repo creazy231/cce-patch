@@ -8,7 +8,7 @@ import { Readme } from "./components/Readme";
 import { Session } from "./components/Session";
 import { Settings } from "./components/Settings";
 import { AppContext, Toasts } from "./components/ui";
-import { standaloneGap } from "./lib/viewport";
+import { createProbe, nextViewport, orientationKey, readProbe, type ViewportState } from "./lib/viewport";
 import { isStandalone } from "./state/store";
 import type { AppState, Store } from "./state/store";
 
@@ -27,33 +27,28 @@ function useStoreState(store: Store): AppState {
 /**
  * Sizes the app to the visual viewport. iOS keeps the layout viewport when the keyboard opens and pans the
  * visual one instead: the frame takes its height and offset, so the dock stays right above the keyboard.
+ * `data-kb` says the keyboard is open (the dock drops its bottom inset), and `data-short-vp` that iOS
+ * draws a viewport short by the top inset, with the home indicator below it (the bottom inset counts as
+ * 0 then; see lib/viewport.ts).
  */
 function useViewport(): void {
   useEffect(() => {
     const root = document.documentElement;
     const vv = window.visualViewport;
-    // Measures the layout viewport and the top inset: iOS in standalone mode can report a viewport short by
-    // the status bar while drawing from the top, which leaves a band at the bottom (see standaloneGap).
-    const probe = document.createElement("div");
-    probe.setAttribute("aria-hidden", "true");
-    probe.style.cssText =
-      "position:fixed;top:0;left:0;width:0;height:100lvh;padding-top:env(safe-area-inset-top);box-sizing:content-box;visibility:hidden;pointer-events:none";
-    document.body.appendChild(probe);
+    const probe = createProbe();
     let frame = 0;
-    let last = 0;
+    let state: ViewportState | null = null;
     const update = () => {
       frame = 0;
       const height = vv ? vv.height : window.innerHeight;
       const top = vv ? Math.max(0, vv.offsetTop) : 0;
-      const probeStyle = getComputedStyle(probe);
-      const lvh = parseFloat(probeStyle.height);
-      const sat = parseFloat(probeStyle.paddingTop);
-      const keyboardOpen = window.innerHeight - height > 120;
-      const gap = standaloneGap({ standalone: isStandalone(), sat, lvh, innerHeight: window.innerHeight, keyboardOpen, last });
-      last = gap;
-      root.style.setProperty("--app-h", `${Math.round(height + gap)}px`);
+      const { lvh, sat } = readProbe(probe);
+      const result = nextViewport(state, { standalone: isStandalone(), sat, lvh, innerHeight: window.innerHeight, vvHeight: height, orientation: orientationKey() });
+      state = result.state;
+      root.style.setProperty("--app-h", `${Math.round(height)}px`);
       root.style.setProperty("--app-top", `${Math.round(top)}px`);
-      root.dataset.kb = keyboardOpen ? "1" : "0";
+      root.dataset.kb = result.keyboardOpen ? "1" : "0";
+      root.dataset.shortVp = result.shortViewport ? "1" : "0";
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(update);
@@ -62,11 +57,13 @@ function useViewport(): void {
     vv?.addEventListener("resize", schedule);
     vv?.addEventListener("scroll", schedule);
     window.addEventListener("resize", schedule);
+    window.addEventListener("orientationchange", schedule);
     return () => {
       if (frame) cancelAnimationFrame(frame);
       vv?.removeEventListener("resize", schedule);
       vv?.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", schedule);
+      window.removeEventListener("orientationchange", schedule);
       probe.remove();
     };
   }, []);

@@ -4,8 +4,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { Mac } from "../lib/macs";
 import { ensureVapidKeys } from "../lib/push";
 import { hostOf } from "../state/format";
+import { displayText, measureDisplay } from "../lib/viewport";
 import { pushStatusText } from "../state/push-status";
-import type { PushState } from "../state/store";
+import { isStandalone, type PushState } from "../state/store";
 import { Book, ChevronRight, Laptop, Plus } from "./icons";
 import { NavBar, useApp } from "./ui";
 
@@ -47,6 +48,10 @@ export function Settings() {
           <div class="kv">
             <span>Version</span>
             <span class="mono kv-value">{__APP_VERSION__}</span>
+          </div>
+          <div class="kv kv-wrap">
+            <span>Display</span>
+            <span class="mono kv-value kv-display">{displayText(measureDisplay(isStandalone()))}</span>
           </div>
           <button type="button" class="kv link" onClick={() => store.navigate({ name: "readme" })}>
             <span class="kv-label">

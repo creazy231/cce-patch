@@ -181,8 +181,8 @@ pre,
   display: grid;
   grid-template-columns: minmax(64px, 1fr) minmax(0, 4fr) minmax(64px, 1fr);
   align-items: center;
-  min-height: calc(var(--sat) + 52px);
-  padding: var(--sat) calc(4px + var(--sar)) 0 calc(4px + var(--sal));
+  min-height: calc(var(--sat) + var(--top-extra) + 52px);
+  padding: calc(var(--sat) + var(--top-extra)) calc(4px + var(--sar)) 0 calc(4px + var(--sal));
   background: var(--bg);
 }
 
@@ -698,7 +698,7 @@ pre,
 .toasts {
   position: absolute;
   z-index: 50;
-  top: calc(var(--sat) + 8px);
+  top: calc(var(--sat) + var(--top-extra) + 8px);
   left: 0;
   right: 0;
   display: flex;

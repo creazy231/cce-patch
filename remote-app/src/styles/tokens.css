@@ -69,6 +69,9 @@
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
   --sar: env(safe-area-inset-right, 0px);
+  /* Under the status bar iOS 26 softly blurs about 28 pt of the page: headers start this much lower then
+     (0 in a browser tab, in landscape and wherever nothing is drawn under the status bar). */
+  --top-extra: min(var(--sat), 24px);
   --gutter: 16px;
 
   --r-1: 8px;
@@ -128,4 +131,10 @@
     --dock-shadow: 0 -0.5px 0 var(--line), 0 -14px 30px rgba(70, 48, 24, 0.07);
     --sheet-shadow: 0 -10px 40px rgba(70, 48, 24, 0.16);
   }
+}
+
+/* iOS draws a viewport short by the top inset and keeps the home indicator in its own strip below it
+   (app.tsx sets data-short-vp): nothing of the app sits behind the home indicator then. */
+:root[data-short-vp="1"] {
+  --sab: 0px;
 }

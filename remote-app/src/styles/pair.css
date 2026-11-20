@@ -339,7 +339,7 @@
 
 .scanner-close {
   position: absolute;
-  top: calc(var(--sat) + 10px);
+  top: calc(var(--sat) + var(--top-extra) + 10px);
   right: calc(12px + var(--sar));
   display: grid;
   place-items: center;
@@ -598,8 +598,30 @@
   color: var(--ink-2);
 }
 
+/* a value that can be long (the Display measurements): it wraps instead of pushing the label away */
+.kv-wrap {
+  align-items: flex-start;
+  padding-top: 15px;
+  padding-bottom: 15px;
+}
+
+.kv-display {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
 .settings-fine {
   margin: 12px 4px 0;
+}
+
+/* groups of one section that follow each other, or a note, are spaced like the rest of Settings */
+.settings .group + .group,
+.settings .settings-fine + .group {
+  margin-top: 12px;
 }
 
 .demo-note {
