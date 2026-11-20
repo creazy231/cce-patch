@@ -485,7 +485,7 @@ Auth, for every `/ws` upgrade:
 Client → hub:
 ```
 {t:"pair", code, device}                      → {t:"paired", deviceId, token, mac:{name}}
-{t:"hello", v:1, deviceId, token}             → {t:"welcome", v:1, mac:{name}, push:boolean} then {t:"projects", …}
+{t:"hello", v:1, deviceId, token}             → {t:"welcome", v:1, mac:{name}, push:boolean, now} then {t:"projects", …} then {t:"usage", …}
 {t:"sub", project, session}                   → {t:"snapshot", …} then live events
 {t:"unsub", project, session}
 {t:"send", id, project, session|null, text, images?:[{mediaType,data}]} → {t:"ack", id, ok, error?, session?}
@@ -496,6 +496,7 @@ Client → hub:
 {t:"push_set", id, subscription:{endpoint, keys:{p256dh, auth}}, vapid:{publicKey, privateJwk}, subject, prefs:{waiting, done, onlyAway, details}} → ack
 {t:"push_clear", id}                                                        → ack
 {t:"push_test", id}                                                         → ack (push_off | push_gone | push_failed + status)
+{t:"usage_refresh"}                                                         → {t:"usage", …} (no ack)
 {t:"ping"}                                                                 → {t:"pong"}
 ```
 `choice` (the bridge turns it into the exact VS Code payload):
@@ -511,6 +512,8 @@ Hub → client:
 {t:"msg", project, session, message}
 {t:"stream", project, session, event}
 {t:"pending", project, session, pending:[Pending]}  the full list whenever it changes
+{t:"usage", state:"ok"|"none"|"unsupported", fiveHour?:{percent, resetsAt?}, week?:{percent, resetsAt?}, at?}
+                                                    after projects on welcome, after usage_refresh, and on any change
 {t:"ack", id, ok, error?, session?, status?}
 {t:"error", code, message}                          e.g. bad_token, bad_code, revoked
 ```
@@ -526,6 +529,19 @@ ignores looking, away and the flood cap; its ack carries `push_off`, `push_gone`
 as visible from its hello until it says otherwise, and it stops counting as looking
 after 40 s without a frame. An old bridge answers the new acked frames with
 `unknown_type` and ignores `visibility`.
+
+Usage frames (added 2026-11-20, protocol version 1, backwards compatible; design:
+`2026-11-20-home-active-new-usage-design.md`). `welcome.now` is the Mac's clock (epoch ms) when
+it sent the welcome; the app measures its read state and the usage's age in it. `usage` mirrors
+Claude Code's own usage meter (2.1.325+): `percent` is the share used (to 0.1, may pass 100),
+`resetsAt` and `at` are epoch ms (`at`: when the Mac got the numbers). `ok` carries the newest
+numbers of any window; `none` means a window has the meter but no numbers (not yet, signed out,
+a login without limits); `unsupported` means no window's Claude Code has the meter. A reset
+time in the past is kept (the app shows that limit as 0 %). `usage_refresh` has no id and no
+ack: the hub has the windows read the usage afresh through a running session's Claude process
+(at most once a minute, the newest reading's window first, until one got new numbers) and
+answers with a `usage` frame either way. An old bridge sends no `usage` and drops
+`usage_refresh` (an unknown frame without an id).
 
 Only `bad_token`, `bad_origin` and `revoked` mean the phone itself was refused: the app
 stops and asks to pair again. Any other error (e.g. `unsupported_version` before the

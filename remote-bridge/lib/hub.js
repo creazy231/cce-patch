@@ -19,9 +19,11 @@
 // Phone protocol (version 1; docs/superpowers/specs/2026-11-19-phone-remote-design.md):
 //   before hello: {t:"pair", code, device} → {t:"paired", deviceId, token, mac:{name}}, or
 //                 {t:"error", code:"bad_code"} (the socket stays)
-//                 {t:"hello", v:1, deviceId, token} → {t:"welcome", v:1, mac:{name}} + {t:"projects"}, or
-//                 {t:"error", code:"bad_token"|"bad_origin"} and close 4401
-//   after hello:  sub, unsub, send, answer, interrupt, open, openClaude, ping (see _onPhoneMessage)
+//                 {t:"hello", v:1, deviceId, token} → {t:"welcome", v:1, mac:{name}, push, now} + {t:"projects"}
+//                 + {t:"usage"}, or {t:"error", code:"bad_token"|"bad_origin"} and close 4401
+//   after hello:  sub, unsub, send, answer, interrupt, open, openClaude, ping, visibility, push_set,
+//                 push_clear, push_test, usage_refresh (see _onPhoneMessage). `usage` (Claude Code's usage
+//                 meter, usageFrame()) also goes to every phone whenever it changes.
 // Close codes: 4400 no pair/hello in time or a frame that is neither, 4401 unauthorized (after an
 // error frame), 4408 idle, 4409 replaced by a newer connection of the same device (after the error
 // too_many_connections), 1009 a frame over 64 KB before hello or 8 MB after, 1011 state.json
@@ -62,10 +64,16 @@ const DNS_NAME_RE = /^[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})*$/;
  * (up to 20 s for the editor tab's channel, up to 20 s for the session's name); the app waits 60 s.
  * @type {Readonly<Record<string, number>>}
  */
-const DEFAULT_CALL_TIMEOUTS_MS = Object.freeze({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000 });
+const DEFAULT_CALL_TIMEOUTS_MS = Object.freeze({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000 });
 const FALLBACK_CALL_TIMEOUT_MS = 20_000;
 const PEER_CALL_TIMEOUT_MS = 60_000; // the hub's own timeout per call decides first
 const DISABLED_MESSAGE = 'Remote access was turned off on the Mac';
+// A usage reading's limits: a reset time before 2024 or more than 30 days ahead is no reset time at all (a past
+// one within that is kept: the app shows that limit as 0 %), and a reading may claim to be from at most a
+// minute in the future (clocks drift).
+const USAGE_RESET_FLOOR_S = 1_704_067_200;
+const USAGE_RESET_AHEAD_S = 30 * 86_400;
+const USAGE_AT_AHEAD_MS = 60_000;
 
 const CLOSE = {
   goingAway: 1001,
@@ -87,6 +95,8 @@ const CLOSE = {
  *   maxPreauthFrames: number,
  *   maxSocketsPerDevice: number,
  *   maxPeers: number,
+ *   lookFreshMs: number,
+ *   usageRefreshMinMs: number,
  * }} Limits
  *   maxQueuedBytes: a phone with more than this waiting in its socket is closed with 1013;
  *   maxPendingFrames / maxPendingBytes: session events a phone may have held back while its
@@ -97,7 +107,9 @@ const CLOSE = {
  *   maxPreauthFrames: frames a socket may send before its hello (pair retries);
  *   maxSocketsPerDevice: a new hello closes the device's oldest socket past this (4409);
  *   maxPeers: peer links (VS Code windows) at once, those still waiting for their proof included; more get 503;
- *   lookFreshMs: a phone counts as looking only while it sent a frame this recently (40 s).
+ *   lookFreshMs: a phone counts as looking only while it sent a frame this recently (40 s);
+ *   usageRefreshMinMs: a phone's usage_refresh makes the windows read the usage afresh at most this often (60 s);
+ *     one within that is answered with what the hub has.
  */
 /** @type {Limits} */
 const DEFAULT_LIMITS = {
@@ -110,6 +122,7 @@ const DEFAULT_LIMITS = {
   maxSocketsPerDevice: 4,
   maxPeers: 64,
   lookFreshMs: 40_000,
+  usageRefreshMinMs: 60_000,
 };
 
 // A device that does not exist still costs a token check, so a wrong id takes as long as a wrong token.
@@ -268,6 +281,43 @@ function withTimeout(promise, ms) {
 }
 
 /**
+ * One limit of a window's usage reading as the phones get it: `percent` (the fraction × 100, to 0.1) and
+ * `resetsAt` in ms. Null when it isn't a usable limit; a reset time out of bounds is left out.
+ * @param {unknown} limit
+ * @param {number} nowMs
+ * @returns {UsageLimit | null}
+ */
+function usageLimit(limit, nowMs) {
+  if (!isRecord(limit)) return null;
+  const used = limit.utilization;
+  if (typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 10) return null;
+  /** @type {UsageLimit} */
+  const out = { percent: Math.round(used * 1000) / 10 };
+  const reset = limit.resetsAt;
+  if (typeof reset === 'number' && Number.isFinite(reset) && reset >= USAGE_RESET_FLOOR_S && reset <= nowMs / 1000 + USAGE_RESET_AHEAD_S) out.resetsAt = reset * 1000;
+  return out;
+}
+
+/**
+ * A window's usage reading (window-agent.js UsageReading), checked field by field; null when it is not one at all.
+ * @param {unknown} reading
+ * @param {number} nowMs
+ * @returns {UsageView | null}
+ */
+function usageView(reading, nowMs) {
+  if (!isRecord(reading)) return null;
+  /** @type {UsageView} */
+  const view = { supported: reading.supported === true };
+  const fiveHour = usageLimit(reading.fiveHour, nowMs);
+  const week = usageLimit(reading.week, nowMs);
+  if (fiveHour) view.fiveHour = fiveHour;
+  if (week) view.week = week;
+  const at = reading.at;
+  if (typeof at === 'number' && Number.isFinite(at) && at > 0 && at <= nowMs + USAGE_AT_AHEAD_MS) view.at = at;
+  return view;
+}
+
+/**
  * Which window call a phone request is, with its arguments; null when the request is not well
  * formed. The arguments are what the window agent takes (the Task 8 adapter maps them):
  * send {session|null, text, images}, answer {session, requestId, choice}, interrupt/open {session},
@@ -308,9 +358,11 @@ function actionCall(frame) {
  *   baseId: string,
  *   publicId: string,
  *   removed: boolean,
+ *   usage: UsageView | null,
  * }} Window
  *   baseId: the id the window gave its project; publicId: the id phones see (baseId, or baseId-2,
- *   -3 … when another window has it already); '' until the window sends a project.
+ *   -3 … when another window has it already); '' until the window sends a project; usage: its last
+ *   usage reading, checked (null until it sends one).
  * @typedef {{ win: Window, frames: string[], bytes: number }} PendingSnapshot
  *   a snapshot call in flight, and the session events held back until its answer is sent
  * @typedef {{
@@ -330,7 +382,12 @@ function actionCall(frame) {
  *   pendingBytes: number,
  *   lastProjects: string,
  * }} Phone
- * @typedef {{ setProject(project: unknown): void, sessionEvent(sessionId: unknown, ev: unknown): void, attention(ev: unknown): void, remove(): void }} WindowHandle
+ * @typedef {{ setProject(project: unknown): void, sessionEvent(sessionId: unknown, ev: unknown): void, attention(ev: unknown): void, usage(reading: unknown): void, remove(): void }} WindowHandle
+ * @typedef {{ percent: number, resetsAt?: number }} UsageLimit
+ *   one limit of Claude Code's usage meter as phones get it: percent used, and when it resets (epoch ms)
+ * @typedef {{ supported: boolean, fiveHour?: UsageLimit, week?: UsageLimit, at?: number }} UsageView
+ *   a window's last usage reading, checked: whether its Claude Code has the meter, its numbers, and when
+ *   they arrived (epoch ms)
  * @typedef {{ code: string, expiresAt: number, link: string, qr: { size: number, path: string } | null }} PairingView
  *   code as XXXX-XXXX; link and qr are empty while the Mac's Tailscale DNS name is unknown
  */
@@ -417,6 +474,11 @@ class Hub extends EventEmitter {
     /** @type {Map<string, Window>} */
     this._byPublicId = new Map();
     this._windowSeq = 0;
+    /** The usage frame as the phones last got it (usageFrame(), as JSON). */
+    this._usageLine = JSON.stringify(this.usageFrame());
+    /** @type {Promise<void> | null} the windows' usage refresh in flight */
+    this._usageRefresh = null;
+    this._usageRefreshAt = -Infinity;
     /** @type {Set<import('./peer-link.js').PeerLink>} the peer links that proved themselves */
     this._peers = new Set();
     /** @type {Set<import('./peer-link.js').PeerLink>} the peer links still waiting for their proof */
@@ -552,7 +614,7 @@ class Hub extends EventEmitter {
     const old = this._windows.get(name);
     if (old) this._removeWindow(old);
     /** @type {Window} */
-    const win = { key: name, call, project: null, baseId: '', publicId: '', removed: this._closed };
+    const win = { key: name, call, project: null, baseId: '', publicId: '', removed: this._closed, usage: null };
     if (!this._closed) {
       this._windows.set(name, win);
       if (this._authed.size > 0) this._tellActive(win, true);
@@ -562,6 +624,7 @@ class Hub extends EventEmitter {
       setProject: (project) => this._setProject(win, project),
       sessionEvent: (sessionId, ev) => this._sessionEvent(win, sessionId, ev),
       attention: (ev) => this._attention(win, ev),
+      usage: (reading) => this._setUsage(win, reading),
       remove: () => this._removeWindow(win),
     };
   }
@@ -569,8 +632,8 @@ class Hub extends EventEmitter {
   /**
    * Registers the window behind a peer link (another VS Code window's bridge) and answers its calls
    * to the hub: `status` → info(), `newPairingCode` → newPairingCode(), `removeDevice {id}`,
-   * `setAppUrl {url}`. The peer sends `project` (its Project), `session` ({session, ev}) and
-   * `attention` (an attention event) events. The window goes when the link closes. Only for a link
+   * `setAppUrl {url}`. The peer sends `project` (its Project), `session` ({session, ev}), `attention`
+   * (an attention event) and `usage` (its usage reading) events. The window goes when the link closes. Only for a link
    * whose peer proved itself (its `auth`).
    * @param {import('./peer-link.js').PeerLink} link
    */
@@ -582,6 +645,7 @@ class Hub extends EventEmitter {
         if (name === 'project') window.setProject(data);
         else if (name === 'session' && isRecord(data)) window.sessionEvent(data.session, data.ev);
         else if (name === 'attention') window.attention(data);
+        else if (name === 'usage') window.usage(data);
       } catch (error) {
         this._log(`a peer event failed: ${errorText(error)}`, 'error');
       }
@@ -663,8 +727,109 @@ class Hub extends EventEmitter {
     if (this._windows.get(win.key) === win) this._windows.delete(win.key);
     if (win.publicId !== '' && this._byPublicId.get(win.publicId) === win) this._byPublicId.delete(win.publicId);
     if (win.project) this._projectsChanged();
+    if (win.usage) this._usageChanged();
     this._emitChange();
     this._emitSafe('window-removed', win.key);
+  }
+
+  // ---- usage: Claude Code's usage meter -------------------------------------------------------------
+
+  /**
+   * The usage frame for the phones: `unsupported` when no window's Claude Code has the usage meter (or no window
+   * is open), `none` when one has it but no window has numbers, else `ok` with the newest numbers (by `at`;
+   * numbers without `at` count as oldest, and the first window wins a tie).
+   * @returns {{ t: 'usage', state: 'ok' | 'none' | 'unsupported', fiveHour?: UsageLimit, week?: UsageLimit, at?: number }}
+   */
+  usageFrame() {
+    let supported = false;
+    /** @type {UsageView | null} */
+    let newest = null;
+    for (const win of this._windows.values()) {
+      const view = win.usage;
+      if (win.removed || !view || !view.supported) continue;
+      supported = true;
+      if (!view.fiveHour && !view.week) continue;
+      if (!newest || (view.at ?? -Infinity) > (newest.at ?? -Infinity)) newest = view;
+    }
+    if (!supported) return { t: 'usage', state: 'unsupported' };
+    if (!newest) return { t: 'usage', state: 'none' };
+    return {
+      t: 'usage',
+      state: 'ok',
+      ...(newest.fiveHour && { fiveHour: { ...newest.fiveHour } }),
+      ...(newest.week && { week: { ...newest.week } }),
+      ...(newest.at !== undefined && { at: newest.at }),
+    };
+  }
+
+  /**
+   * A window's usage reading. One that is not a reading at all is ignored (the window's last one stays); a
+   * change of the frame goes to every phone.
+   * @param {Window} win @param {unknown} reading
+   */
+  _setUsage(win, reading) {
+    if (win.removed) return;
+    const view = usageView(reading, this._now());
+    if (view === null) return;
+    win.usage = view;
+    this._usageChanged();
+  }
+
+  /** Sends the usage frame to every phone past its hello, when it changed. */
+  _usageChanged() {
+    const line = JSON.stringify(this.usageFrame());
+    if (line === this._usageLine) return;
+    this._usageLine = line;
+    for (const phone of this._authed) this._sendText(phone, line);
+  }
+
+  /**
+   * A phone asks for fresh usage numbers. One refresh runs at a time (a request meanwhile waits for it), and
+   * one starts at most every limits.usageRefreshMinMs (a request within that is answered with what the hub
+   * has). The asker gets the usage frame either way; a change reaches every phone as it happens.
+   * @param {Phone} phone
+   */
+  async _onUsageRefresh(phone) {
+    try {
+      if (this._usageRefresh) {
+        await this._usageRefresh;
+      } else if (performance.now() - this._usageRefreshAt >= this._limits.usageRefreshMinMs) {
+        this._usageRefreshAt = performance.now();
+        const refresh = this._refreshUsage().finally(() => {
+          if (this._usageRefresh === refresh) this._usageRefresh = null;
+        });
+        this._usageRefresh = refresh;
+        await refresh;
+      }
+    } catch (error) {
+      this._log(`could not refresh the usage: ${errorText(error)}`, 'warn');
+    }
+    if (!phone.closed) this._sendText(phone, this._usageLine);
+  }
+
+  /**
+   * Has the windows whose Claude Code has the usage meter read it afresh (their `usage` call), the newest reading
+   * first, one after another, until one of them got new numbers. An answer's reading counts like a `usage`
+   * event; a window of an older bridge answers `unknown_method` and is passed over without a word.
+   */
+  async _refreshUsage() {
+    const atOf = (/** @type {Window} */ win) => win.usage?.at ?? -Infinity;
+    const windows = [...this._windows.values()]
+      .filter((win) => !win.removed && win.usage?.supported === true)
+      .sort((a, b) => (atOf(a) === atOf(b) ? 0 : atOf(b) > atOf(a) ? 1 : -1));
+    for (const win of windows) {
+      if (win.removed || this._closed) continue;
+      let answer;
+      try {
+        answer = await this._callWindow(win, 'usage', {});
+      } catch (error) {
+        const code = isRecord(error) && typeof error.code === 'string' ? error.code : errorText(error);
+        if (code !== 'unknown_method' && errorText(error) !== 'unknown_method') this._log(`a window could not refresh the usage: ${errorText(error)}`, 'warn');
+        continue;
+      }
+      if (isRecord(answer) && isRecord(answer.reading)) this._setUsage(win, answer.reading);
+      if (isRecord(answer) && answer.refreshed === true) return;
+    }
   }
 
   /**
@@ -976,6 +1141,9 @@ class Hub extends EventEmitter {
       case 'push_clear':
       case 'push_test':
         return this._onPush(phone, frame);
+      case 'usage_refresh':
+        this._onUsageRefresh(phone).catch(() => {});
+        return;
       case 'sub':
         return this._onSub(phone, frame);
       case 'unsub':
@@ -1124,9 +1292,10 @@ class Hub extends EventEmitter {
       this._sendError(same[i], 'too_many_connections', `This phone has more than ${this._limits.maxSocketsPerDevice} connections to the Mac; the oldest was closed.`);
       this._closePhone(same[i], CLOSE.replaced, 'replaced by a newer connection');
     }
-    this._send(phone, { t: 'welcome', v: PROTOCOL_VERSION, mac: { name: this._macNameText() }, push: this._notifier.hasPush(device.id) });
+    this._send(phone, { t: 'welcome', v: PROTOCOL_VERSION, mac: { name: this._macNameText() }, push: this._notifier.hasPush(device.id), now: this._now() });
     phone.lastProjects = this._projectsLine();
     this._sendText(phone, phone.lastProjects);
+    this._sendText(phone, this._usageLine);
     if (wasIdle) this._setActive(true);
     this._touchDevice(device.id);
     this._log(`a phone connected (device ${device.id})`);

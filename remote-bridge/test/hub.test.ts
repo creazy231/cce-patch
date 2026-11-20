@@ -119,6 +119,7 @@ async function rawPhone(ctx: Ctx, creds?: Creds): Promise<RawConn> {
   const raw = await RawConn.open(ctx.port, Buffer.concat([request, hello]));
   expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("welcome");
   expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("projects");
+  expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("usage");
   return raw;
 }
 
@@ -264,7 +265,9 @@ async function connectPhone(ctx: Ctx, creds: Creds, { origin = creds.origin }: {
   expect(welcome).toMatchObject({ t: "welcome", v: 1, mac: { name: MAC_NAME } });
   const projects = await phone.next("projects");
   expect(projects.t).toBe("projects");
-  return { phone, projects: projects.projects as Json[], welcome };
+  const usage = await phone.next("usage");
+  expect(usage.t).toBe("usage");
+  return { phone, projects: projects.projects as Json[], welcome, usage };
 }
 
 async function pairedPhone(ctx: Ctx) {
@@ -1531,7 +1534,7 @@ describe("requests", () => {
   });
 
   test("window calls time out per method: send 50 s (a new session can take 40 s), active 10 s, the rest 20 s", () => {
-    expect(DEFAULT_CALL_TIMEOUTS_MS).toEqual({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000 });
+    expect(DEFAULT_CALL_TIMEOUTS_MS).toEqual({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000 });
   });
 
   test("callTimeoutMs can set the timeout of one method", async () => {
@@ -2474,6 +2477,7 @@ describe("close", () => {
     const raw = await RawConn.open(ctx.port, Buffer.concat([request, hello]));
     expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("welcome");
     expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("projects");
+    expect(JSON.parse((await raw.frame()).payload.toString("utf8")).t).toBe("usage");
     const closing = ctx.hub.close();
     const close = await raw.frame();
     expect(close.opcode).toBe(OP.close);
@@ -2537,6 +2541,173 @@ describe("close", () => {
 });
 
 // ---- the production runtime ---------------------------------------------------------------------
+
+// ---- usage: Claude Code's usage meter, from the windows to the phones ---------------------------------
+
+describe("usage", () => {
+  const NOW_S = Math.floor(T0 / 1000); // the hub's clock in these tests
+  const R = NOW_S + 3_600; // an hour ahead: inside the hub's "now + 30 days"
+  const reading = (at?: number, u = 0.42, resetsAt: number = R) => ({ supported: true, fiveHour: { utilization: u, resetsAt }, ...(at !== undefined && { at }) });
+
+  /** The next usage frame that passes `check`; project lists and earlier usage frames are skipped. */
+  async function usageWhere(phone: Phone, check: (frame: Json) => boolean): Promise<Json> {
+    for (;;) {
+      const frame = await nextFrame(phone, "usage");
+      if (check(frame)) return frame;
+    }
+  }
+
+  test("the welcome carries the Mac's clock, and a usage frame follows projects", async () => {
+    const ctx = await startHub();
+    const creds = await pairPhone(ctx);
+    const phone = await Phone.open(ctx.port, { origin: creds.origin });
+    phone.send({ t: "hello", v: 1, deviceId: creds.deviceId, token: creds.token });
+    expect(await phone.next("welcome")).toMatchObject({ t: "welcome", now: T0 });
+    expect((await phone.next("projects")).t).toBe("projects");
+    expect(await phone.next("usage")).toEqual({ t: "usage", state: "unsupported" });
+  });
+
+  test("a window's reading becomes the frame, converted", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const { handle } = fakeWindow(ctx.hub);
+    handle.usage(reading(1_000));
+    expect(await nextFrame(phone, "usage")).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 42, resetsAt: R * 1000 }, at: 1_000 });
+    handle.usage(reading(2_000, 0.4567));
+    expect((await nextFrame(phone, "usage")).fiveHour.percent).toBe(45.7);
+  });
+
+  test("the newest reading wins, and one without at counts as oldest", async () => {
+    const ctx = await startHub();
+    const w1 = fakeWindow(ctx.hub, { key: "w1", id: "p1" });
+    const w2 = fakeWindow(ctx.hub, { key: "w2", id: "p2" });
+    w1.handle.usage(reading(5_000, 0.1));
+    w2.handle.usage(reading(undefined, 0.9));
+    expect(ctx.hub.usageFrame().fiveHour.percent).toBe(10);
+    w2.handle.usage(reading(6_000, 0.9));
+    expect(ctx.hub.usageFrame().fiveHour.percent).toBe(90);
+  });
+
+  test("states: none when supported without numbers, unsupported without support", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const { handle } = fakeWindow(ctx.hub);
+    handle.usage({ supported: true });
+    expect(await nextFrame(phone, "usage")).toEqual({ t: "usage", state: "none" });
+    handle.usage({ supported: false });
+    expect(await nextFrame(phone, "usage")).toEqual({ t: "usage", state: "unsupported" });
+    handle.usage(reading(1_000));
+    expect((await nextFrame(phone, "usage")).state).toBe("ok");
+    handle.remove();
+    expect(await nextFrame(phone, "usage")).toEqual({ t: "usage", state: "unsupported" });
+  });
+
+  test("validation: impossible numbers are dropped field by field, a past reset is kept", async () => {
+    const ctx = await startHub();
+    const { handle } = fakeWindow(ctx.hub);
+    const frameOf = (value: unknown) => {
+      handle.usage(value);
+      return ctx.hub.usageFrame();
+    };
+    const week = { utilization: 0.1 };
+    expect(frameOf({ supported: true, fiveHour: { utilization: 11 }, week, at: 1 })).toEqual({ t: "usage", state: "ok", week: { percent: 10 }, at: 1 });
+    expect(frameOf({ supported: true, fiveHour: { utilization: "x" }, week, at: 2 })).toEqual({ t: "usage", state: "ok", week: { percent: 10 }, at: 2 });
+    expect(frameOf({ supported: true, fiveHour: { utilization: 0.5, resetsAt: 1_600_000_000 }, at: 3 }).fiveHour).toEqual({ percent: 50 });
+    expect(frameOf({ supported: true, fiveHour: { utilization: 0.5, resetsAt: NOW_S + 31 * 86_400 }, at: 4 }).fiveHour).toEqual({ percent: 50 });
+    expect(frameOf({ supported: true, fiveHour: { utilization: 0.5, resetsAt: NOW_S - 86_400 }, at: 5 }).fiveHour).toEqual({ percent: 50, resetsAt: (NOW_S - 86_400) * 1000 });
+    expect(frameOf({ supported: true, fiveHour: { utilization: 0.5 }, at: T0 + 61_000 })).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 50 } });
+    expect(frameOf("not a reading")).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 50 } }); // ignored: the last reading stays
+  });
+
+  test("an unchanged reading sends nothing", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const { handle } = fakeWindow(ctx.hub);
+    handle.usage(reading(1_000));
+    await nextFrame(phone, "usage");
+    handle.usage(reading(1_000));
+    await phone.expectQuiet();
+  });
+
+  test("usage_refresh: the windows are asked newest first until one refreshed, and the asker gets the frame", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const w1 = fakeWindow(ctx.hub, { key: "w1", id: "p1", handlers: { usage: () => ({ refreshed: false, reason: "no_session", reading: reading(2_000) }) } });
+    const w2 = fakeWindow(ctx.hub, { key: "w2", id: "p2", handlers: { usage: () => ({ refreshed: true, reading: reading(9_000, 0.5) }) } });
+    const w3 = fakeWindow(ctx.hub, { key: "w3", id: "p3", handlers: { usage: () => ({ refreshed: true, reading: reading(9_500, 0.7) }) } });
+    w1.handle.usage(reading(2_000));
+    w2.handle.usage(reading(3_000));
+    w3.handle.usage(reading(1_000));
+    phone.send({ t: "usage_refresh" });
+    expect(await usageWhere(phone, (frame) => frame.fiveHour?.percent === 50)).toMatchObject({ state: "ok", at: 9_000 });
+    expect((await w2.calls.next()).method).toBe("usage");
+    expect([w1.calls.pending, w3.calls.pending]).toEqual([0, 0]);
+  });
+
+  test("an older window's unknown_method doesn't stop the refresh", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const order: string[] = [];
+    const old = fakeWindow(ctx.hub, {
+      key: "w1",
+      id: "p1",
+      handlers: {
+        usage: () => {
+          order.push("w1");
+          throw Object.assign(new Error("unknown_method"), { code: "unknown_method" });
+        },
+      },
+    });
+    const fresh = fakeWindow(ctx.hub, {
+      key: "w2",
+      id: "p2",
+      handlers: {
+        usage: () => {
+          order.push("w2");
+          return { refreshed: true, reading: reading(9_000, 0.5) };
+        },
+      },
+    });
+    old.handle.usage(reading(5_000));
+    fresh.handle.usage(reading(4_000));
+    phone.send({ t: "usage_refresh" });
+    expect((await usageWhere(phone, (frame) => frame.fiveHour?.percent === 50)).at).toBe(9_000);
+    expect(order).toEqual(["w1", "w2"]);
+  });
+
+  test("a refresh in flight is joined, and within usageRefreshMinMs the hub only answers", async () => {
+    const ctx = await startHub({ hub: { limits: { usageRefreshMinMs: 60_000 } } });
+    const one = await pairedPhone(ctx);
+    const two = await pairedPhone(ctx);
+    const gate = deferred<Json>();
+    const w = fakeWindow(ctx.hub, { handlers: { usage: () => gate.promise } });
+    w.handle.usage(reading(1_000));
+    await nextFrame(one.phone, "usage");
+    await nextFrame(two.phone, "usage");
+    one.phone.send({ t: "usage_refresh" });
+    two.phone.send({ t: "usage_refresh" });
+    await roundTrip(one.phone);
+    await roundTrip(two.phone);
+    expect((await w.calls.next()).method).toBe("usage");
+    expect(w.calls.pending).toBe(0);
+    gate.resolve({ refreshed: true, reading: reading(2_000, 0.6) });
+    const twoFrames = async (phone: Phone) => [await nextFrame(phone, "usage"), await nextFrame(phone, "usage")].map((frame) => frame.at);
+    expect(await twoFrames(one.phone)).toEqual([2_000, 2_000]); // the change, then the answer
+    expect(await twoFrames(two.phone)).toEqual([2_000, 2_000]);
+    one.phone.send({ t: "usage_refresh" });
+    expect((await nextFrame(one.phone, "usage")).at).toBe(2_000); // answered at once, without asking the window
+    expect(w.calls.pending).toBe(0);
+  });
+
+  test("a phone that never asks gets no refresh", async () => {
+    const ctx = await startHub();
+    const w = fakeWindow(ctx.hub, { handlers: { usage: () => ({ refreshed: true, reading: reading(1) }) } });
+    w.handle.usage(reading(1_000));
+    const { phone } = await pairedPhone(ctx);
+    await roundTrip(phone);
+    expect(w.calls.pending).toBe(0);
+  });
+});
 
 describe("under real Node", () => {
   test.skipIf(!Bun.which("node"))(
