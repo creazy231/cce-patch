@@ -1361,3 +1361,30 @@
   background: var(--bg-3);
   color: var(--ink);
 }
+
+/* read aloud: the speaker under a reply, and the note in the dock while something is read */
+.t-speak {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 28px;
+  margin: 2px 0 0 -7px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.t-speak:active {
+  background: var(--bg-3);
+}
+
+.t-speak.on {
+  color: var(--accent-2);
+}
+
+.dock-note.reading .link-btn {
+  margin-left: auto;
+}

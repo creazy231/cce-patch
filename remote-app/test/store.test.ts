@@ -3,6 +3,7 @@ import { RemoteError, type ClientEvents, type ClientState } from "../src/lib/cli
 import { saveMacs, selectMac, type Mac } from "../src/lib/macs";
 import type { Ack, ImageUpload, Pending, PhoneMessage, Project } from "../src/lib/protocol";
 import { ensureVapidKeys, setBadgeCount, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
+import { DEFAULT_SPEECH_PREFS, type SpeakerLike, type SpeechPrefs } from "../src/lib/speech";
 import { buildTranscript } from "../src/lib/transcript";
 import type { Source } from "../src/state/source";
 import { Store } from "../src/state/store";
@@ -1016,5 +1017,174 @@ describe("the badge when Macs go away", () => {
     await flush();
     expect(push.caches.map("cce-badge")).toEqual({ "": 5 });
     expect(push.cleared()).toBe(cleared);
+  });
+});
+
+// ---- read aloud ----
+
+class FakeSpeaker implements SpeakerLike {
+  supported = true;
+  current: string | null = null;
+  blocked = false;
+  calls: Array<[string, string, string]> = [];
+  private listeners = new Set<() => void>();
+  onChange(listener: () => void) {
+    this.listeners.add(listener);
+    return () => void this.listeners.delete(listener);
+  }
+  voices() {
+    return [];
+  }
+  speak(id: string, text: string) {
+    this.calls.push(["speak", id, text]);
+    this.current = id;
+    this.fire();
+  }
+  enqueue(id: string, text: string) {
+    this.calls.push(["enqueue", id, text]);
+    if (!this.current) {
+      this.current = id;
+      this.fire();
+    }
+  }
+  stop() {
+    this.calls.push(["stop", "", ""]);
+    this.current = null;
+    this.fire();
+  }
+  unlock() {
+    this.calls.push(["unlock", "", ""]);
+  }
+  fire() {
+    this.listeners.forEach((listener) => listener());
+  }
+  read() {
+    return this.calls.filter(([kind]) => kind === "enqueue" || kind === "speak").map(([, id, text]) => [id, text]);
+  }
+}
+
+const assistant = (uuid: string, ...texts: string[]): PhoneMessage => ({ uuid, type: "assistant", content: texts.map((text) => ({ type: "text" as const, text })) });
+const question = (requestId: string): Pending => ({
+  requestId,
+  kind: "question",
+  toolName: "AskUserQuestion",
+  input: { questions: [{ question: "Which file?", header: "File", options: [], multiSelect: false }] },
+  canAlwaysAllow: false,
+  createdAt: 1,
+});
+const setVisibility = (state: "visible" | "hidden") => {
+  (globalThis.document as unknown as { visibilityState: string }).visibilityState = state;
+};
+
+let speaker: FakeSpeaker;
+
+function speechStore(prefs: Partial<SpeechPrefs> = {}, pending: Pending[] = []) {
+  store.stop();
+  (globalThis.localStorage as unknown as MemoryStorage).setItem("cce-remote:speech", JSON.stringify({ ...DEFAULT_SPEECH_PREFS, ...prefs }));
+  setVisibility("visible");
+  fake = new FakeSource();
+  speaker = new FakeSpeaker();
+  store = new Store({ demo: true, createSource: () => fake, speaker });
+  store.start();
+  store.openSession(PROJECT, SESSION);
+  snapshot([said("m1", "first"), assistant("a0", "An old reply.")], pending);
+}
+
+const live = (message: PhoneMessage) => fake.emit("msg", { t: "msg", project: PROJECT, session: SESSION, message });
+
+describe("read aloud", () => {
+  test("a new reply is read when New replies is on, one item per text block", () => {
+    speechStore({ replies: true });
+    live(assistant("a1", "Hello there.", "And more."));
+    expect(speaker.read()).toEqual([
+      ["a1#0", "Hello there."],
+      ["a1#1", "And more."],
+    ]);
+  });
+
+  test("nothing is read when it is off", () => {
+    speechStore({ replies: false });
+    live(assistant("a1", "Hello there."));
+    expect(speaker.read()).toEqual([]);
+  });
+
+  test("the history of the snapshot, your own messages and replies without text are not read", () => {
+    speechStore({ replies: true });
+    live(said("u9", "hi"));
+    live({ uuid: "a2", type: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] });
+    live({ uuid: "a3", type: "assistant", parent: "t1", content: [{ type: "text", text: "a subagent's words" }] } as PhoneMessage);
+    expect(speaker.read()).toEqual([]);
+  });
+
+  test("a reply that replaces one already shown is not read again", () => {
+    speechStore({ replies: true });
+    live(assistant("a1", "Hello there."));
+    live(assistant("a1", "Hello there."));
+    expect(speaker.read().length).toBe(1);
+  });
+
+  test("nothing is read while the app is hidden", () => {
+    speechStore({ replies: true });
+    setVisibility("hidden");
+    live(assistant("a1", "Hello there."));
+    expect(speaker.read()).toEqual([]);
+  });
+
+  test("new questions and permission prompts are read once when that is on", () => {
+    speechStore({ questions: true });
+    fake.emit("pending", { t: "pending", project: PROJECT, session: SESSION, pending: [question("q1")] });
+    fake.emit("pending", { t: "pending", project: PROJECT, session: SESSION, pending: [question("q1"), prompt("c")] });
+    expect(speaker.read()).toEqual([
+      ["prompt:q1", "Claude asks: Which file?"],
+      ["prompt:c", "Claude wants to use Bash"],
+    ]);
+  });
+
+  test("prompts that were already open when the session opened are not read", () => {
+    speechStore({ questions: true }, [prompt("c")]);
+    fake.emit("pending", { t: "pending", project: PROJECT, session: SESSION, pending: [prompt("c")] });
+    expect(speaker.read()).toEqual([]);
+  });
+
+  test("a tap reads a reply and a second tap stops it", () => {
+    speechStore();
+    store.toggleSpeak("a0#0", "An old reply.");
+    expect(speaker.read()).toEqual([["a0#0", "An old reply."]]);
+    expect(store.state.speech.current).toBe("a0#0");
+    store.toggleSpeak("a0#0", "An old reply.");
+    expect(speaker.calls.at(-1)?.[0]).toBe("stop");
+    expect(store.state.speech.current).toBeNull();
+  });
+
+  test("leaving the session or hiding the app stops reading", async () => {
+    speechStore();
+    store.toggleSpeak("a0#0", "An old reply.");
+    store.navigateRoot({ name: "home" });
+    await flush(); // the way back goes through popstate
+    expect(store.state.route.name).toBe("home");
+    expect(store.state.speech.current).toBeNull();
+    store.openSession(PROJECT, SESSION);
+    store.toggleSpeak("a0#0", "An old reply.");
+    setVisibility("hidden");
+    fireDocument("visibilitychange");
+    expect(store.state.speech.current).toBeNull();
+  });
+
+  test("turning New replies on is a tap that unlocks speech, and the choice is kept", () => {
+    speechStore();
+    store.setSpeechPref("replies", true);
+    expect(speaker.calls.some(([kind]) => kind === "unlock")).toBe(true);
+    expect(store.state.speech.prefs.replies).toBe(true);
+    expect(JSON.parse((globalThis.localStorage as unknown as MemoryStorage).getItem("cce-remote:speech") ?? "{}").replies).toBe(true);
+    store.setSpeechPref("replies", false);
+    expect(speaker.calls.at(-1)?.[0]).toBe("stop");
+  });
+
+  test("when iOS blocks speech, a hint says to tap a speaker button", () => {
+    speechStore();
+    speaker.blocked = true;
+    speaker.fire();
+    expect(store.state.speech.blocked).toBe(true);
+    expect(store.state.toasts.at(-1)?.text).toBe("Tap a speaker button once to allow reading aloud.");
   });
 });

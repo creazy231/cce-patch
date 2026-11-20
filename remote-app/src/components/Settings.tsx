@@ -4,9 +4,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { Mac } from "../lib/macs";
 import { ensureVapidKeys } from "../lib/push";
 import { hostOf } from "../state/format";
+import { SPEECH_RATES } from "../lib/speech";
 import { displayText, measureDisplay } from "../lib/viewport";
 import { pushStatusText } from "../state/push-status";
-import { isStandalone, type PushState } from "../state/store";
+import { isStandalone, type PushState, type SpeechState } from "../state/store";
 import { Book, ChevronRight, Laptop, Plus } from "./icons";
 import { NavBar, useApp } from "./ui";
 
@@ -42,6 +43,9 @@ export function Settings() {
 
         <h2 class="group-title">Notifications</h2>
         <Notifications push={state.push} demo={state.demo} macName={store.macName} />
+
+        <h2 class="group-title">Read aloud</h2>
+        <ReadAloud speech={state.speech} />
 
         <h2 class="group-title">About</h2>
         <div class="group">
@@ -145,6 +149,62 @@ function Notifications({ push, demo, macName }: { push: PushState; demo: boolean
           <span class="kv-label">Turn off notifications</span>
         </button>
       </div>
+    </>
+  );
+}
+
+function ReadAloud({ speech }: { speech: SpeechState }) {
+  const { store } = useApp();
+  const [voices, setVoices] = useState(() => store.speechVoices());
+  // iOS loads its voices late: the list fills in when they are there.
+  useEffect(() => {
+    const synth = (globalThis as { speechSynthesis?: EventTarget }).speechSynthesis;
+    if (!synth || typeof synth.addEventListener !== "function") return;
+    const update = () => setVoices(store.speechVoices());
+    synth.addEventListener("voiceschanged", update);
+    update();
+    return () => synth.removeEventListener("voiceschanged", update);
+  }, []);
+
+  if (!speech.supported) {
+    return (
+      <div class="group group-note">
+        <p>This browser can't read aloud.</p>
+      </div>
+    );
+  }
+  const sorted = [...voices].sort((a, b) => a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
+  return (
+    <>
+      <div class="group">
+        <SwitchRow
+          label="New replies"
+          sub="Reads each new reply while the app is open"
+          checked={speech.prefs.replies}
+          onChange={(value) => store.setSpeechPref("replies", value)}
+        />
+        <SwitchRow label="Questions and permission prompts" checked={speech.prefs.questions} onChange={(value) => store.setSpeechPref("questions", value)} />
+      </div>
+      <div class="group">
+        <label class="kv">
+          <span>Voice</span>
+          <select class="kv-select" value={speech.prefs.voice} onChange={(event) => store.setSpeechPref("voice", event.currentTarget.value)}>
+            <option value="auto">Automatic</option>
+            {sorted.map((voice) => (
+              <option key={voice.voiceURI} value={voice.voiceURI}>{`${voice.name} (${voice.lang})`}</option>
+            ))}
+          </select>
+        </label>
+        <label class="kv">
+          <span>Speed</span>
+          <select class="kv-select" value={String(speech.prefs.rate)} onChange={(event) => store.setSpeechPref("rate", Number(event.currentTarget.value))}>
+            {SPEECH_RATES.map((rate) => (
+              <option key={rate} value={String(rate)}>{`${rate}×`}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <p class="fine settings-fine">Uses the voices on this iPhone, so nothing is sent anywhere. Tap the speaker under a reply to hear it.</p>
     </>
   );
 }

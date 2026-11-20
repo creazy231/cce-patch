@@ -26,10 +26,12 @@ import {
   Search,
   SelectionIcon,
   Slash,
+  SpeakerIcon,
+  Stop,
   Terminal,
   Thinking,
 } from "./icons";
-import { Spinner, memo } from "./ui";
+import { Spinner, memo, useApp } from "./ui";
 
 // ---- Markdown ----
 
@@ -88,6 +90,7 @@ const Item = memo(function Item({ item, activity }: { item: TranscriptItem; acti
       return (
         <div class="t-item t-text">
           <Markdown text={item.text} />
+          <SpeakButton id={item.id} text={item.text} />
         </div>
       );
     case "thinking":
@@ -121,6 +124,26 @@ const Item = memo(function Item({ item, activity }: { item: TranscriptItem; acti
       );
   }
 });
+
+// ---- read aloud ----
+
+/** Reads a reply aloud, or stops it while it is the one being read. Hidden where the browser can't speak. */
+function SpeakButton({ id, text }: { id: string; text: string }) {
+  const { state, store } = useApp();
+  if (!state.speech.supported) return null;
+  const speaking = state.speech.current === id;
+  return (
+    <button
+      type="button"
+      class={speaking ? "t-speak on" : "t-speak"}
+      aria-label={speaking ? "Stop reading" : "Read aloud"}
+      aria-pressed={speaking}
+      onClick={() => store.toggleSpeak(id, text)}
+    >
+      {speaking ? <Stop size={14} /> : <SpeakerIcon size={16} />}
+    </button>
+  );
+}
 
 // ---- user messages ----
 

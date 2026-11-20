@@ -7,7 +7,7 @@ import { buildTranscript, latestTodos, streamText, type Todos } from "../lib/tra
 import { STATE_LABEL } from "../state/format";
 import { findSession, waitingCount } from "../state/store";
 import { Composer } from "./Composer";
-import { ArrowDown, ChevronDown, Ellipsis, External, Stop, Terminal } from "./icons";
+import { ArrowDown, ChevronDown, Ellipsis, External, SpeakerIcon, Stop, Terminal } from "./icons";
 import { PromptCard } from "./PromptCard";
 import { TodoList, Transcript } from "./Transcript";
 import { ConnectionBanner, NavBar, Sheet, Spinner, StatusDot, useApp } from "./ui";
@@ -173,6 +173,15 @@ export function Session() {
             onOpenOnMac={() => view.session && void store.openOnMac(view.project, view.session)}
           />
         )}
+        {state.speech.current !== null && (
+          <p class="dock-note reading" role="status">
+            <SpeakerIcon size={15} />
+            Reading aloud
+            <button type="button" class="link-btn" onClick={() => store.stopSpeaking()}>
+              Stop
+            </button>
+          </p>
+        )}
         {notice && (
           <p class={`dock-note ${notice.tone}`} role="status">
             {notice.tone === "busy" && <Spinner size={13} />}
@@ -201,6 +210,15 @@ export function Session() {
               icon: <External size={20} />,
               run: () => view.session && void store.openOnMac(view.project, view.session),
             },
+            ...(state.speech.supported
+              ? [
+                  {
+                    label: state.speech.prefs.replies ? "Stop reading new replies aloud" : "Read new replies aloud",
+                    icon: <SpeakerIcon size={20} />,
+                    run: () => store.setSpeechPref("replies", !state.speech.prefs.replies),
+                  },
+                ]
+              : []),
             ...(turnOpen ? [{ label: "Stop", icon: <Stop size={20} />, tone: "danger" as const, run: () => void store.interrupt() }] : []),
           ]}
         />

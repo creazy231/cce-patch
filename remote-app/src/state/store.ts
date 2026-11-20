@@ -36,6 +36,7 @@ import type {
   StreamFrame,
   WelcomeFrame,
 } from "../lib/protocol";
+import { Speaker, loadSpeechPrefs, saveSpeechPrefs, type SpeakerLike, type SpeechPrefs } from "../lib/speech";
 import { EMPTY_STREAM, applyStreamEvent, streamAfterMessage, type LocalMessage, type StreamState } from "../lib/transcript";
 import { DEMO_MAC_ID, DEMO_MAC_NAME, DEMO_MAC_URL, DemoSource, type DemoOptions } from "./demo-source";
 import { cleanName, errorCode, errorMessage, errorText, hostOf, isUnconfirmed } from "./format";
@@ -141,12 +142,43 @@ export interface AppState {
   refusal: { code: string; message: string } | null;
   projects: Project[];
   push: PushState;
+  speech: SpeechState;
   route: Route;
   nav: Nav;
   view: SessionView | null;
   pair: PairFlow;
   toasts: Toast[];
 }
+
+/** Read aloud: what the speaker is doing and the user's choices. */
+export interface SpeechState {
+  supported: boolean;
+  /** The transcript item being read (`<uuid>#<block>`, or `prompt:<requestId>`), or null. */
+  current: string | null;
+  /** iOS refused to start speech that no tap started. */
+  blocked: boolean;
+  prefs: SpeechPrefs;
+}
+
+/** What is read for a prompt that appears (read aloud, "Questions and permission prompts"). */
+export function promptSpeech(pending: Pending): string {
+  switch (pending.kind) {
+    case "question": {
+      const questions = (pending.input as { questions?: unknown }).questions;
+      const first = Array.isArray(questions) ? (questions[0] as { question?: unknown } | undefined) : undefined;
+      return typeof first?.question === "string" && first.question.trim() ? `Claude asks: ${first.question.trim()}` : "Claude has a question";
+    }
+    case "tool":
+      return `Claude wants to use ${pending.toolName}`;
+    case "plan":
+      return "Claude has a plan for you to approve";
+    default:
+      return "Claude needs your input";
+  }
+}
+
+/** How many prompt ids the store remembers as seen, so a prompt is read once. */
+const SEEN_PROMPTS = 500;
 
 const EMPTY_PAIR: PairFlow = { input: null, fromLink: false, inBrowser: false, busy: false, error: null, errorMessage: "" };
 
@@ -161,6 +193,8 @@ export interface StoreOptions {
   createSource?: (mac: Mac, demo: boolean) => Source;
   /** The browser's push APIs (tests); the real ones by default. */
   pushEnv?: PushEnv;
+  /** Reads replies aloud (tests); the browser's speech synthesis by default. */
+  speaker?: SpeakerLike;
 }
 
 // ---- helpers ------------------------------------------------------------------------------------
@@ -263,6 +297,9 @@ export class Store {
   private rootRoute: Route | null = null;
   private seq = 0;
   private toastSeq = 0;
+  private readonly speaker: SpeakerLike;
+  /** Prompts already shown or read, so a repeated `pending` frame doesn't read them again. */
+  private readonly seenPrompts = new Set<string>();
   private viewSeq = 0;
   private started = false;
   /** The Mac sent an error during the current connection attempt (see AppState.refusal). */
@@ -272,6 +309,7 @@ export class Store {
     this.demoOptions = options.demoOptions;
     this.createSource = options.createSource;
     this.pushEnv = options.pushEnv;
+    this.speaker = options.speaker ?? new Speaker();
     const macs = options.demo ? [demoMac()] : loadMacs();
     const macId = options.demo ? DEMO_MAC_ID : selectedMacId();
     this.state = {
@@ -290,12 +328,14 @@ export class Store {
         mac: "unknown",
         error: null,
       },
+      speech: { supported: this.speaker.supported, current: this.speaker.current, blocked: this.speaker.blocked, prefs: loadSpeechPrefs() },
       route: macs.length ? { name: "home" } : { name: "pair" },
       nav: "replace",
       view: null,
       pair: EMPTY_PAIR,
       toasts: [],
     };
+    this.speaker.onChange(() => this.onSpeaker());
   }
 
   // ---- observing ----
@@ -354,6 +394,7 @@ export class Store {
   }
 
   stop(): void {
+    this.speaker.stop();
     window.removeEventListener("popstate", this.onPopState);
     document.removeEventListener("visibilitychange", this.onVisibility);
     this.dropSource();
@@ -406,6 +447,7 @@ export class Store {
 
   private readonly onVisibility = (): void => {
     if (document.visibilityState === "visible") this.refreshPushSupport();
+    else this.speaker.stop(); // iOS suspends a hidden app: what is queued would come out much later
   };
 
   private readonly onPopState = (event: PopStateEvent): void => {
@@ -429,6 +471,7 @@ export class Store {
     const keep = route.name === "session" && view !== null && view.project === route.project && view.session === route.session;
     if (!keep) {
       if (view?.session) this.source?.unsubscribe();
+      this.speaker.stop();
       view = null;
       if (route.name === "session") view = newView(++this.viewSeq, route.project, route.session);
       else if (route.name === "new") view = newView(++this.viewSeq, route.project, null);
@@ -682,6 +725,7 @@ export class Store {
   private onSnapshot(frame: SnapshotFrame): void {
     const view = this.viewFor(frame);
     if (!view) return;
+    for (const pending of frame.pending) this.seePrompt(pending.requestId);
     // Messages this phone sent and the Mac hasn't replayed yet stay below the history.
     const locals = view.messages.filter((m) => m.local);
     const known = new Set(frame.messages.map((m) => m.uuid));
@@ -707,6 +751,7 @@ export class Store {
     let messages = view.messages;
     let outgoing = view.outgoing;
     const index = message.uuid ? messages.findIndex((m) => m.uuid === message.uuid && !m.local) : -1;
+    const isNew = index < 0;
     messages = index >= 0 ? messages.map((m, i) => (i === index ? message : m)) : [...messages, message];
     if (message.uuid && outgoing[message.uuid]) {
       // The CLI's replay of a message sent from here: the real one replaces the local copy.
@@ -727,6 +772,7 @@ export class Store {
       messages = messages.slice(-KEEP_MESSAGES);
     }
     this.set({ view: { ...view, messages, outgoing, truncatedBefore, stream: streamAfterMessage(view.stream, message) } });
+    if (isNew) this.readReply(message);
   }
 
   private onStream(frame: StreamFrame): void {
@@ -742,6 +788,11 @@ export class Store {
     const open = new Set(frame.pending.map((p) => p.requestId));
     const keepOpen = <T>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => open.has(id)));
     this.set({ view: { ...view, pending: frame.pending, answering: keepOpen(view.answering), answerErrors: keepOpen(view.answerErrors) } });
+    for (const pending of frame.pending) {
+      if (this.seenPrompts.has(pending.requestId)) continue;
+      this.seePrompt(pending.requestId);
+      if (this.state.speech.prefs.questions && this.visible()) this.speaker.enqueue(`prompt:${pending.requestId}`, promptSpeech(pending), this.speechOptions());
+    }
   }
 
   private onError(frame: ErrorFrame): void {
@@ -1049,6 +1100,67 @@ export class Store {
       if (!next) this.navigateRoot({ name: "pair" });
     }
     this.toast(`Removed ${mac.name}`, "info");
+  }
+
+  // ---- read aloud ----
+
+  /** A tap on a reply's speaker button: reads it, or stops it when it is the one being read. */
+  toggleSpeak(id: string, text: string): void {
+    if (this.speaker.current === id) this.speaker.stop();
+    else this.speaker.speak(id, text, this.speechOptions());
+  }
+
+  stopSpeaking(): void {
+    this.speaker.stop();
+  }
+
+  /** Saves a read-aloud choice. Turning reading on happens in a tap, which lets iOS speak later on its own. */
+  setSpeechPref<K extends keyof SpeechPrefs>(key: K, value: SpeechPrefs[K]): void {
+    const prefs = { ...this.state.speech.prefs, [key]: value };
+    saveSpeechPrefs(prefs);
+    this.set({ speech: { ...this.state.speech, prefs } });
+    if ((key === "replies" || key === "questions") && value === true) this.speaker.unlock();
+    if (key === "replies" && value === false) this.speaker.stop();
+  }
+
+  /** The voices the phone has, for Settings. */
+  speechVoices() {
+    return this.speaker.voices();
+  }
+
+  private onSpeaker(): void {
+    const { current, blocked } = this.speaker;
+    const wasBlocked = this.state.speech.blocked;
+    if (current === this.state.speech.current && blocked === wasBlocked) return;
+    this.set({ speech: { ...this.state.speech, current, blocked } });
+    if (blocked && !wasBlocked) this.toast("Tap a speaker button once to allow reading aloud.", "info");
+  }
+
+  /** A reply that just arrived for the open session: each text block is read, when New replies is on. */
+  private readReply(message: PhoneMessage): void {
+    if (!this.state.speech.prefs.replies || message.type !== "assistant" || !message.uuid || !this.visible()) return;
+    if (typeof (message as { parent?: unknown }).parent === "string") return; // a subagent's words
+    (message.content ?? []).forEach((block, index) => {
+      if (block.type === "text" && block.text.trim()) this.speaker.enqueue(`${message.uuid}#${index}`, block.text, this.speechOptions());
+    });
+  }
+
+  private seePrompt(requestId: string): void {
+    this.seenPrompts.add(requestId);
+    if (this.seenPrompts.size > SEEN_PROMPTS) {
+      const oldest = this.seenPrompts.values().next().value;
+      if (oldest !== undefined) this.seenPrompts.delete(oldest);
+    }
+  }
+
+  private speechOptions() {
+    const prefs = this.state.speech.prefs;
+    const language = (globalThis as { navigator?: { language?: string } }).navigator?.language;
+    return { voice: prefs.voice, rate: prefs.rate, fallbackLang: language || "en-US" };
+  }
+
+  private visible(): boolean {
+    return (globalThis as { document?: { visibilityState?: string } }).document?.visibilityState === "visible";
   }
 
   // ---- badge and toasts ----
