@@ -35,6 +35,7 @@ import type {
   SessionSummary,
   SnapshotFrame,
   StreamFrame,
+  UsageFrame,
   WelcomeFrame,
 } from "../lib/protocol";
 import { EMPTY_STREAM, applyStreamEvent, streamAfterMessage, type LocalMessage, type StreamState } from "../lib/transcript";
@@ -143,6 +144,8 @@ export interface AppState {
   projects: Project[];
   /** What this phone has read of the selected Mac's sessions; null until the Mac's first project list (and with no Mac). */
   read: ReadState | null;
+  /** Claude Code's usage meter on the selected Mac, as last heard; null until the Mac sent one (an older Mac never does). */
+  usage: UsageFrame | null;
   push: PushState;
   route: Route;
   nav: Nav;
@@ -150,6 +153,13 @@ export interface AppState {
   pair: PairFlow;
   toasts: Toast[];
 }
+
+/** How often the app asks the Mac for fresh usage numbers while it is open and in front. */
+export const USAGE_REFRESH_MS = 300_000;
+/** Coming back to the front asks again only when the last ask is at least this old. */
+export const USAGE_VISIBLE_MIN_MS = 60_000;
+/** How often the refresh schedule looks whether an ask is due. */
+const USAGE_TICK_MS = 30_000;
 
 const EMPTY_PAIR: PairFlow = { input: null, fromLink: false, inBrowser: false, busy: false, error: null, errorMessage: "" };
 
@@ -285,6 +295,9 @@ export class Store {
   private readonly now: () => number;
   /** The Mac's clock minus this phone's, from the last welcome (0 without one, or from an older Mac). */
   private skew = 0;
+  /** When this phone last asked the Mac for fresh usage numbers (this phone's clock). */
+  private usageAskedAt = -Infinity;
+  private usageTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: StoreOptions) {
     this.demoOptions = options.demoOptions;
@@ -302,6 +315,7 @@ export class Store {
       refusal: null,
       projects: [],
       read: null,
+      usage: null,
       push: {
         support: pushSupport(options.pushEnv),
         on: isPushOn(options.pushEnv),
@@ -360,6 +374,7 @@ export class Store {
     this.started = true;
     window.addEventListener("popstate", this.onPopState);
     document.addEventListener("visibilitychange", this.onVisibility);
+    this.usageTimer = setInterval(() => this.usageTick(), USAGE_TICK_MS);
 
     const pairText = pairFragment(location.hash);
     const link = parseOpenLink(location.search);
@@ -381,6 +396,8 @@ export class Store {
   stop(): void {
     window.removeEventListener("popstate", this.onPopState);
     document.removeEventListener("visibilitychange", this.onVisibility);
+    if (this.usageTimer !== null) clearInterval(this.usageTimer);
+    this.usageTimer = null;
     this.dropSource();
     this.started = false;
   }
@@ -433,6 +450,7 @@ export class Store {
     if (document.visibilityState === "visible") {
       this.refreshPushSupport();
       this.noteSeen();
+      if (this.state.conn === "open" && this.now() - this.usageAskedAt >= USAGE_VISIBLE_MIN_MS) this.askUsage();
       return;
     }
     // Hidden now: the session on screen was seen until this moment.
@@ -494,12 +512,12 @@ export class Store {
     const mac = this.state.macs.find((m) => m.id === id);
     this.skew = 0;
     if (!mac) {
-      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [], read: null });
+      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [], read: null, usage: null });
       this.updateBadge();
       this.updatePushBadge(this.state.projects);
       return;
     }
-    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [], read: this.state.demo ? null : loadReadState(mac.id) });
+    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [], read: this.state.demo ? null : loadReadState(mac.id), usage: null });
     this.updateBadge();
     this.updatePushBadge(this.state.projects);
     if (this.createSource) this.useSource(this.createSource(mac, this.state.demo));
@@ -519,6 +537,7 @@ export class Store {
         this.ensureReadState();
         this.noteSeen();
       }),
+      source.on("usage", (usage) => this.set({ usage })),
       source.on("snapshot", (frame) => this.onSnapshot(frame)),
       source.on("msg", (frame) => this.onMessage(frame)),
       source.on("stream", (frame) => this.onStream(frame)),
@@ -571,6 +590,8 @@ export class Store {
    */
   private async onWelcome(frame: WelcomeFrame): Promise<void> {
     this.skew = typeof frame.now === "number" && Number.isFinite(frame.now) ? frame.now - this.now() : 0;
+    // Opening the app (each connection) asks for fresh usage numbers; not while the page is in the background.
+    if (pageVisible()) this.askUsage();
     if (!this.state.push.on) {
       if (!this.state.demo && frame.push === true) this.clearPushOnMac();
       return;
@@ -1091,6 +1112,20 @@ export class Store {
       if (!next) this.navigateRoot({ name: "pair" });
     }
     this.toast(`Removed ${mac.name}`, "info");
+  }
+
+  // ---- Claude Code's usage meter ----
+
+  /** Asks the connected Mac for fresh usage numbers (it answers with a usage frame). */
+  private askUsage(): void {
+    if (!this.source || this.state.conn !== "open") return;
+    this.usageAskedAt = this.now();
+    this.source.usageRefresh();
+  }
+
+  /** The refresh schedule's tick (every 30 s): asks again once the last ask is USAGE_REFRESH_MS old, while open and in front. */
+  usageTick(): void {
+    if (this.state.conn === "open" && pageVisible() && this.now() - this.usageAskedAt >= USAGE_REFRESH_MS) this.askUsage();
   }
 
   // ---- what this phone has read ----

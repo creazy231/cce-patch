@@ -1,6 +1,6 @@
 # CCE Remote
 
-A home-screen web app for your iPhone that follows and controls the Claude Code sessions running in VS Code on your Mac. It shows every open VS Code window with the patched Claude Code as a project, with its sessions and their live state: needs you, running, done, idle. Open a session to read along while Claude works, answer its permission prompts, questions and plan approvals, send messages and photos, start new sessions, or stop a turn.
+A home-screen web app for your iPhone that follows and controls the Claude Code sessions running in VS Code on your Mac. It shows every open VS Code window with the patched Claude Code as a project, with its sessions and their live state: needs you, running, new, idle. Open a session to read along while Claude works, answer its permission prompts, questions and plan approvals, send messages and photos, start new sessions, or stop a turn.
 
 The phone talks to your Mac directly, over Tailscale. The server that hosts this app only serves its files: your sessions never pass through it.
 
@@ -68,6 +68,15 @@ Notifications are end-to-end encrypted: the Mac encrypts each one for this phone
 
 A notification can wait on Apple's push service until the phone is reachable; waiting notifications expire after an hour, finished-session notifications after 10 minutes, and test notifications after a minute. Nothing is sent while remote access is off, while no VS Code window is open, or while the Mac sleeps.
 
+## The home screen
+
+- **Usage.** At the top, Claude Code's own usage meter from the Mac: how much of the 5-hour limit and the weekly limit of the Claude account it is logged in to is used, and when each resets.
+  - **Refreshing.** The app asks for fresh numbers when it opens and every 5 minutes while it is open. The Mac also passes on new numbers whenever Claude Code learns them, which happens on every reply.
+  - **When no session is open.** The Mac reads fresh numbers through a Claude Code session that is open in one of its VS Code windows, at most once a minute. Without one, the card shows the last numbers and how old they are.
+  - **What it needs.** Claude Code 2.1.325 or later (older versions, such as Cursor's, have no usage meter), and a Claude subscription login. An API key has no such limits.
+- **Active.** Every session that is running or waiting for you, from all windows, in one list. Each row names its window, and the window lists below hold the rest.
+- **New.** A green dot marks a session with activity this phone hasn't shown yet. Opening it here clears it. Each phone keeps its own, apart from VS Code: reading a session in VS Code doesn't clear it here, nor the other way round.
+
 ## Dictation
 
 Tap the microphone in the message field and speak. Your words appear in the field as you talk; tap the microphone again to stop, edit if you like, then send. Nothing is sent until you tap Send. On the iPhone the words come from Apple's dictation, in the phone's language or the one chosen in Settings → Dictation. If iOS doesn't offer dictation to the home-screen app, the microphone opens the keyboard instead, and its own microphone key does the same job.
@@ -112,8 +121,8 @@ For a local bridge, `http://localhost` and `http://127.0.0.1` addresses are acce
 
 ## Files
 
-- `src/lib/`: the protocol client, pairing, storage of paired Macs, the transcript view model, image downscaling, demo data (tested with `bun test`).
-- `src/state/`: the app's store, the demo source, question answers, text helpers.
+- `src/lib/`: the protocol client, pairing, storage of paired Macs, what this phone has read (`readstate.ts`), the usage frame and how the card shows it (`usage.ts`), the transcript view model, image downscaling, demo data (tested with `bun test`).
+- `src/state/`: the app's store, the home screen's lists and dots (`home.ts`), the demo source, question answers, text helpers.
 - `src/components/`: the screens (Home, Session, Pair, Settings) and their parts.
 - `src/styles/`: design tokens and styles (dark by default, light when the system is light).
 - `public/`: the manifest, the service worker and the icons.

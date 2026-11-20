@@ -454,3 +454,80 @@
 .sk-row {
   pointer-events: none;
 }
+
+/* ---- usage: Claude Code's 5-hour and weekly limits on the Mac ---- */
+
+.usage-card {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0 4px;
+  padding: 12px 14px 11px;
+  border-radius: var(--r-3);
+  background: var(--bg-2);
+}
+
+.usage-row {
+  --bar: var(--accent);
+  display: grid;
+  gap: 5px;
+}
+
+.usage-row.tone-warn {
+  --bar: var(--waiting);
+}
+
+.usage-row.tone-danger {
+  --bar: var(--danger);
+}
+
+.usage-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.usage-label {
+  font-weight: 550;
+}
+
+.usage-percent {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-4);
+  overflow: hidden;
+}
+
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--bar);
+  transition: width 0.4s var(--ease-out);
+}
+
+.usage-reset,
+.usage-updated,
+.usage-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-note {
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-bar > span {
+    transition: none;
+  }
+}

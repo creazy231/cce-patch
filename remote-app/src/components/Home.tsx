@@ -10,6 +10,7 @@ import { dotState, homeSections, tally as tallyOf, type ActiveRow, type WindowSe
 import { waitingCount } from "../state/store";
 import { Branch, ChevronDown, ChevronRight, Ellipsis, Laptop, Plus, Sliders, Terminal } from "./icons";
 import { ConnectionBanner, Sheet, StatusDot, memo, useApp, type SheetAction } from "./ui";
+import { UsageCard } from "./UsageCard";
 
 /** Remembered while a session is open, so coming back lands where the list was. */
 let savedScroll = 0;
@@ -112,7 +113,7 @@ export function Home() {
           <Summary tally={tally} projects={projects.length} conn={conn} />
         </div>
 
-        {/* the usage card goes here */}
+        {state.usage && <UsageCard usage={state.usage} macNow={store.macNow()} />}
 
         <ConnectionBanner />
 

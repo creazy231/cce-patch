@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { RemoteError, type ClientEvents, type ClientState } from "../src/lib/client";
 import { saveMacs, selectMac, type Mac } from "../src/lib/macs";
-import type { Ack, ImageUpload, Pending, PhoneMessage, Project, SessionSummary } from "../src/lib/protocol";
+import type { Ack, ImageUpload, Pending, PhoneMessage, Project, SessionSummary, UsageFrame } from "../src/lib/protocol";
 import { isNew } from "../src/lib/readstate";
 import { ensureVapidKeys, setBadgeCount, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
 import { buildTranscript } from "../src/lib/transcript";
@@ -1141,5 +1141,100 @@ describe("new on this phone", () => {
     expect(store.state.read).not.toBeNull();
     const keys = [...(localStorage as unknown as { data: Map<string, string> }).data.keys()];
     expect(keys.filter((key) => key.startsWith("cce-remote:read:"))).toEqual([]);
+  });
+});
+
+// ---- Claude Code's usage meter on the Mac ----
+
+describe("usage", () => {
+  let phoneNow = 0;
+  const frame: UsageFrame = { t: "usage", state: "ok", fiveHour: { percent: 42 }, at: 1 };
+  /** Sets the page's visibility; `fire` also sends the event. */
+  const visible = (on: boolean, fire = true) => {
+    (document as unknown as { visibilityState: string }).visibilityState = on ? "visible" : "hidden";
+    if (fire) fireDocument("visibilitychange");
+  };
+  const asked = () => fake.count("usageRefresh");
+
+  function usageStore() {
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: true, createSource: () => fake, now: () => phoneNow });
+    store.start();
+  }
+
+  test("a usage frame becomes state.usage, and a reconnect keeps it", () => {
+    usageStore();
+    fake.emit("usage", frame);
+    expect(store.state.usage).toEqual(frame);
+    fake.emit("state", "offline");
+    expect(store.state.usage).toEqual(frame);
+  });
+
+  test("usage_refresh goes out after every welcome while the page is in front", () => {
+    phoneNow = 0;
+    usageStore();
+    visible(true, false);
+    welcome();
+    welcome();
+    expect(asked()).toBe(2);
+    visible(false, false);
+    welcome();
+    expect(asked()).toBe(2);
+  });
+
+  test("every 5 minutes while open and visible, never while hidden", () => {
+    phoneNow = 0;
+    usageStore();
+    visible(true, false);
+    welcome();
+    expect(asked()).toBe(1);
+    phoneNow = 299_999;
+    store.usageTick();
+    expect(asked()).toBe(1);
+    phoneNow = 300_000;
+    store.usageTick();
+    expect(asked()).toBe(2);
+    visible(false);
+    phoneNow = 900_000;
+    store.usageTick();
+    expect(asked()).toBe(2);
+  });
+
+  test("becoming visible sends one after 60 s, not before", () => {
+    phoneNow = 0;
+    usageStore();
+    visible(true, false);
+    welcome();
+    visible(false);
+    phoneNow = 59_999;
+    visible(true);
+    expect(asked()).toBe(1);
+    visible(false);
+    phoneNow = 60_000;
+    visible(true);
+    expect(asked()).toBe(2);
+  });
+
+  test("switching Macs clears the card", () => {
+    saveMacs([MAC_A, MAC_B], localStorage);
+    selectMac(MAC_A.id, localStorage);
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: false, createSource: () => fake, pushEnv: fakePushEnv().env, now: () => phoneNow });
+    store.start();
+    fake.emit("usage", frame);
+    expect(store.state.usage).toEqual(frame);
+    store.switchMac(MAC_B.id);
+    expect(store.state.usage).toBeNull();
+  });
+
+  test("no usage frame: no card, no toast", async () => {
+    usageStore();
+    visible(true, false);
+    welcome();
+    await flush();
+    expect(store.state.usage).toBeNull();
+    expect(store.state.toasts).toEqual([]);
   });
 });
