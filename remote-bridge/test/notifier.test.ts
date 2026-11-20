@@ -302,6 +302,17 @@ describe("attention", () => {
     expect(h.calls).toHaveLength(13); // a new minute
   });
 
+  test("an open without prompts drops the session's entry", async () => {
+    const h = harness();
+    withPush(h);
+    attention(h, waiting("s1", "r1"));
+    expect(h.notifier._sessions.size).toBe(1);
+
+    attention(h, open("s1", []));
+    expect(h.notifier._sessions.size).toBe(0);
+    expect(h.notifier.waitingCount()).toBe(0);
+  });
+
   test("the badge counts waiting sessions", async () => {
     const h = harness();
     withPush(h);
@@ -321,6 +332,17 @@ describe("attention", () => {
     attention(h, done("s5"));
     await settle();
     expect(JSON.parse(h.calls[2].push.payload).badge).toBe(0);
+  });
+
+  test("the notifier's payload limit applies to its pushes", async () => {
+    const h = harness({ limits: { maxPayloadBytes: 300 } });
+    withPush(h);
+    attention(h, waiting("s1", "r1", { kind: "question", text: "Q".repeat(200) }, "T".repeat(200)));
+    h.clock.advance(4000);
+    await settle();
+
+    expect(h.calls).toHaveLength(1);
+    expect(Buffer.byteLength(h.calls[0].push.payload)).toBeLessThanOrEqual(300);
   });
 
   test("a gone subscription is removed, other failures are logged once an hour", async () => {
@@ -406,6 +428,24 @@ describe("test pushes", () => {
     expect(h.calls[0].push.urgency).toBe("high");
   });
 
+  test("a test push carries the waiting badge", async () => {
+    const h = harness();
+    withPush(h);
+    attention(h, waiting("s1", "r1"));
+    expect(h.notifier.waitingCount()).toBe(1);
+
+    expect(await h.notifier.test("dev1")).toEqual({ ok: true });
+    expect(JSON.parse(h.calls[0].push.payload).badge).toBe(1);
+  });
+
+  test("the notifier's payload limit applies to test pushes", async () => {
+    const h = harness({ limits: { maxPayloadBytes: 100 } });
+    withPush(h);
+
+    expect(await h.notifier.test("dev1")).toEqual({ ok: true });
+    expect(Buffer.byteLength(h.calls[0].push.payload)).toBeLessThanOrEqual(100);
+  });
+
   test("test without a subscription, and its failures", async () => {
     const off = harness();
     expect(await off.notifier.test("dev1")).toEqual({ ok: false, error: "push_off" });
@@ -461,6 +501,20 @@ describe("buildPayload", () => {
     const encoded = JSON.parse(buildPayload({ ...base, project: "a/b", session: "s 1", kind: "done", details: true, ev: done("s 1") }));
     expect(encoded.url).toBe("/?mac=dev1&project=a%2Fb&session=s%201");
     expect(encoded.tag).toBe("dev1:a/b:s 1");
+  });
+
+  test("an injected maxPayloadBytes bounds the payload", () => {
+    const payload = buildPayload({
+      ...base,
+      kind: "waiting",
+      details: true,
+      ev: waiting("s1", "r1", { kind: "question", text: "Q".repeat(200) }, "T".repeat(200)),
+      maxPayloadBytes: 300,
+    });
+    expect(Buffer.byteLength(payload)).toBeLessThanOrEqual(300);
+    const parsed = JSON.parse(payload);
+    expect(parsed.v).toBe(1);
+    expect(parsed.kind).toBe("waiting");
   });
 
   test("cuts by code point, and keeps the payload at 3000 bytes", () => {

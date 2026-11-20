@@ -206,10 +206,11 @@ function normalizePushFrame(frame, allowEndpoint) {
  *   ev?: any,
  *   badge?: unknown,
  *   macName?: unknown,
+ *   maxPayloadBytes?: number,
  * }} input
  * @returns {string}
  */
-function buildPayload({ kind, details, mac, project, projectName, session, ev, badge, macName }) {
+function buildPayload({ kind, details, mac, project, projectName, session, ev, badge, macName, maxPayloadBytes }) {
   const macText = text(mac);
   const badgeText = Number.isSafeInteger(badge) && /** @type {number} */ (badge) >= 0 ? /** @type {number} */ (badge) : 0;
   /** @type {Record<string, any>} */
@@ -262,7 +263,7 @@ function buildPayload({ kind, details, mac, project, projectName, session, ev, b
   }
 
   let json = JSON.stringify(payload);
-  const max = NOTIFIER_LIMITS.maxPayloadBytes;
+  const max = maxPayloadBytes ?? NOTIFIER_LIMITS.maxPayloadBytes;
   // The body is what is shortened first. If the identifiers alone are too big for that, the other
   // fields follow in the same way, so the payload always fits.
   for (const field of /** @type {const} */ (['body', 'title', 'tag', 'url'])) {
@@ -357,6 +358,8 @@ class Notifier {
         this._timers.clearTimeout(timer);
         entry.timers.delete(requestId);
       }
+      // Nothing is open in this session anymore: its entry would only linger.
+      if (entry.ids.size === 0) this._sessions.delete(JSON.stringify([key, project, session]));
       return;
     }
     if (ev.kind === 'done') {
@@ -459,7 +462,7 @@ class Notifier {
     }
     if (!device || !isRecord(device.push)) return { ok: false, error: 'push_off' };
     const record = device.push;
-    const payload = buildPayload({ kind: 'test', mac: deviceId, macName: this._macNameText(), badge: 0 });
+    const payload = buildPayload({ kind: 'test', mac: deviceId, macName: this._macNameText(), badge: this.waitingCount(), maxPayloadBytes: this._limits.maxPayloadBytes });
     const push = {
       endpoint: record.endpoint,
       keys: record.keys,
@@ -631,6 +634,7 @@ class Notifier {
         ev,
         badge: this.waitingCount(),
         macName: this._macNameText(),
+        maxPayloadBytes: this._limits.maxPayloadBytes,
       });
       const push = {
         endpoint: record.endpoint,

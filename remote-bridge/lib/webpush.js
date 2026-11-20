@@ -316,6 +316,7 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
       });
       req.end(body);
     } catch {
+      stopTimer();
       settle(failed());
     }
   });
