@@ -71,13 +71,18 @@ export interface PushCaches {
 
 export interface PushEnv {
   navigator: PushNavigator;
-  Notification: PushNotification;
+  /** Undefined when the browser has no Notification API. */
+  Notification?: PushNotification;
+  /** Whether the browser has the Push API's PushManager. */
+  pushManager: boolean;
   crypto: Crypto;
   storage: StorageLike;
   origin: string;
   userAgent: string;
   maxTouchPoints: number;
   standalone(): boolean;
+  /** How long to wait for `serviceWorker.ready`, in ms. */
+  readyTimeoutMs?: number;
   caches?: PushCaches;
 }
 
@@ -120,10 +125,8 @@ function defaultPushEnv(): PushEnv {
   const navigator = (globalThis as { navigator?: { userAgent?: string; maxTouchPoints?: number } }).navigator;
   return {
     navigator: (navigator ?? {}) as PushNavigator,
-    Notification: (globalThis as { Notification?: PushNotification }).Notification ?? {
-      permission: "default",
-      requestPermission: async () => "default",
-    },
+    Notification: (globalThis as { Notification?: PushNotification }).Notification,
+    pushManager: "PushManager" in globalThis,
     crypto: (globalThis as { crypto?: Crypto }).crypto ?? ({} as Crypto),
     storage: defaultStorage(),
     origin: typeof location !== "undefined" ? location.origin : "",
@@ -166,6 +169,25 @@ function sameKey(key: ArrayBuffer | Uint8Array | null | undefined, expected: Uin
   return actual.every((byte, i) => byte === expected[i]);
 }
 
+const DEFAULT_READY_TIMEOUT_MS = 10000;
+
+/** A `serviceWorker.ready` that is waited for at most `timeoutMs`; the timeout rejects with `error`. */
+function readyWithin<T>(ready: Promise<T>, timeoutMs: number, error: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(error)), timeoutMs);
+    ready.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (cause) => {
+        clearTimeout(timer);
+        reject(cause);
+      },
+    );
+  });
+}
+
 // ---- support -------------------------------------------------------------------------------------
 
 /** Whether this browser can show Web Push notifications for the app. */
@@ -173,7 +195,7 @@ export function pushSupport(env?: PushEnv): PushSupport {
   const e = env ?? defaultPushEnv();
   const ios = /iPhone|iPad|iPod/.test(e.userAgent) || (e.maxTouchPoints > 1 && /Macintosh/.test(e.userAgent));
   if (ios && !e.standalone()) return "not-installed";
-  if (!e.navigator.serviceWorker || typeof e.Notification?.requestPermission !== "function") return "unsupported";
+  if (!e.navigator.serviceWorker || !e.pushManager || typeof e.Notification?.requestPermission !== "function") return "unsupported";
   if (e.Notification.permission === "denied") return "denied";
   return "ok";
 }
@@ -181,6 +203,9 @@ export function pushSupport(env?: PushEnv): PushSupport {
 // ---- VAPID keys ----------------------------------------------------------------------------------
 
 const VAPID_KEY = "cce-remote:vapid";
+
+/** One key pair being made per storage, so concurrent calls share it. */
+const vapidInFlight = new WeakMap<StorageLike, Promise<PushVapidKeys>>();
 
 function loadVapidKeys(env: PushEnv): PushVapidKeys | null {
   try {
@@ -204,19 +229,30 @@ export async function ensureVapidKeys(env?: PushEnv): Promise<PushVapidKeys> {
   const e = env ?? defaultPushEnv();
   const stored = loadVapidKeys(e);
   if (stored) return stored;
-  const pair = (await e.crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
-  const raw = new Uint8Array(await e.crypto.subtle.exportKey("raw", pair.publicKey));
-  const jwk = await e.crypto.subtle.exportKey("jwk", pair.privateKey);
-  const keys: PushVapidKeys = {
-    publicKey: toBase64Url(raw),
-    privateJwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d },
-  };
+  // Settings' mount and a tap can ask at the same time: they share the one pair being made.
+  const pending = vapidInFlight.get(e.storage);
+  if (pending) return pending;
+  const making = (async (): Promise<PushVapidKeys> => {
+    const pair = (await e.crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const raw = new Uint8Array(await e.crypto.subtle.exportKey("raw", pair.publicKey));
+    const jwk = await e.crypto.subtle.exportKey("jwk", pair.privateKey);
+    const keys: PushVapidKeys = {
+      publicKey: toBase64Url(raw),
+      privateJwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d },
+    };
+    try {
+      e.storage.setItem(VAPID_KEY, JSON.stringify(keys));
+    } catch {
+      // Not persisted: these keys work for this run.
+    }
+    return keys;
+  })();
+  vapidInFlight.set(e.storage, making);
   try {
-    e.storage.setItem(VAPID_KEY, JSON.stringify(keys));
-  } catch {
-    // Not persisted: these keys work for this run.
+    return await making;
+  } finally {
+    vapidInFlight.delete(e.storage);
   }
-  return keys;
 }
 
 // ---- subscribing ---------------------------------------------------------------------------------
@@ -242,12 +278,13 @@ function setupFrom(subscription: PushSubscriptionLike, vapid: PushVapidKeys, pre
  */
 export async function subscribePush(prefs: PushPrefs, env?: PushEnv): Promise<PushSetup> {
   const e = env ?? defaultPushEnv();
+  if (!e.Notification) throw new Error("unsupported");
   const permission = await e.Notification.requestPermission();
   if (permission !== "granted") throw new Error("denied");
   const vapid = await ensureVapidKeys(e);
   const serviceWorker = e.navigator.serviceWorker;
   if (!serviceWorker) throw new Error("unsupported");
-  const registration = await serviceWorker.ready;
+  const registration = await readyWithin(serviceWorker.ready, e.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS, "unsupported");
   const pushManager = registration.pushManager;
   if (!pushManager) throw new Error("unsupported");
 
@@ -264,19 +301,19 @@ export async function subscribePush(prefs: PushPrefs, env?: PushEnv): Promise<Pu
 /** The setup to send to a Mac, or null when permission, a subscription or the keys are missing. */
 export async function currentSetup(prefs: PushPrefs, env?: PushEnv): Promise<PushSetup | null> {
   const e = env ?? defaultPushEnv();
-  if (e.Notification.permission !== "granted") return null;
+  if (!e.Notification || e.Notification.permission !== "granted") return null;
   const serviceWorker = e.navigator.serviceWorker;
   if (!serviceWorker) return null;
   const vapid = loadVapidKeys(e);
   if (!vapid) return null;
-  try {
-    const registration = await serviceWorker.ready;
-    const subscription = await registration.pushManager?.getSubscription();
-    if (!subscription) return null;
-    return setupFrom(subscription, vapid, prefs, e.origin);
-  } catch {
-    return null;
-  }
+  // A wait that times out is not "gone": it throws, and the caller keeps notifications on.
+  const registration = await readyWithin(serviceWorker.ready, e.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS, "timeout");
+  const subscription = await registration.pushManager?.getSubscription();
+  if (!subscription) return null;
+  // A subscription bound to another key would be refused by every push service: the setup is stale.
+  const key = subscription.options?.applicationServerKey;
+  if (bytesOf(key) && !sameKey(key, fromBase64Url(vapid.publicKey))) return null;
+  return setupFrom(subscription, vapid, prefs, e.origin);
 }
 
 export async function unsubscribePush(env?: PushEnv): Promise<void> {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { StorageLike } from "../src/lib/macs";
 import {
+  currentSetup,
   ensureVapidKeys,
   parseOpenLink,
   pushSupport,
@@ -94,6 +95,11 @@ interface FakeOptions {
   requestPermission?: () => Promise<string>;
   /** No service worker at all: a desktop browser without Push. */
   noServiceWorker?: boolean;
+  /** Whether the browser has the Push API's PushManager. */
+  pushManager?: boolean;
+  /** A service worker that never becomes ready. */
+  readyHangs?: boolean;
+  readyTimeoutMs?: number;
   crypto?: PushEnv["crypto"];
   storage?: StorageLike;
   caches?: PushEnv["caches"];
@@ -113,7 +119,7 @@ function fakeEnv(options: FakeOptions = {}): PushEnv {
     ? { setAppBadge: options.setAppBadge, clearAppBadge: options.clearAppBadge }
     : {
         serviceWorker: {
-          ready: Promise.resolve(registration),
+          ready: options.readyHangs ? new Promise<never>(() => {}) : Promise.resolve(registration),
         },
         setAppBadge: options.setAppBadge,
         clearAppBadge: options.clearAppBadge,
@@ -130,6 +136,8 @@ function fakeEnv(options: FakeOptions = {}): PushEnv {
     userAgent: options.userAgent ?? IPHONE_UA,
     maxTouchPoints: options.maxTouchPoints ?? 5,
     standalone: () => options.standalone ?? true,
+    pushManager: options.pushManager ?? true,
+    readyTimeoutMs: options.readyTimeoutMs,
     caches: options.caches ?? new FakeCaches(),
   };
 }
@@ -182,6 +190,7 @@ function recordingEnv(log: string[]) {
     userAgent: IPHONE_UA,
     maxTouchPoints: 5,
     standalone: () => true,
+    pushManager: true,
   };
   return { env, storage, pushManager, current: () => current, subscribedWith: () => subscribedWith };
 }
@@ -211,6 +220,31 @@ describe("pushSupport", () => {
 
   test("the home-screen app with the APIs is ok", () => {
     expect(pushSupport(fakeEnv())).toBe("ok");
+  });
+
+  test("a service worker but no Notification is unsupported", () => {
+    const env = fakeEnv();
+    env.Notification = undefined;
+    expect(pushSupport(env)).toBe("unsupported");
+  });
+
+  test("a service worker and Notification but no PushManager is unsupported", () => {
+    expect(pushSupport(fakeEnv({ pushManager: false }))).toBe("unsupported");
+  });
+});
+
+describe("without the Notification API", () => {
+  test("subscribing rejects with 'unsupported'", async () => {
+    const env = fakeEnv();
+    env.Notification = undefined;
+    await expect(subscribePush(PREFS, env)).rejects.toThrow("unsupported");
+  });
+
+  test("currentSetup is null", async () => {
+    const env = fakeEnv();
+    await ensureVapidKeys(env);
+    env.Notification = undefined;
+    expect(await currentSetup(PREFS, env)).toBeNull();
   });
 });
 
@@ -244,6 +278,42 @@ describe("ensureVapidKeys", () => {
     const keys = await ensureVapidKeys(fakeEnv({ storage: brokenStorage }));
     expect(decodeBase64Url(keys.publicKey).length).toBe(65);
     expect(keys.privateJwk.d).toBeTruthy();
+  });
+
+  test("concurrent calls make one key pair", async () => {
+    const log: string[] = [];
+    const { env } = recordingEnv(log);
+
+    const [first, second] = await Promise.all([ensureVapidKeys(env), ensureVapidKeys(env)]);
+
+    expect(log.filter((step) => step === "generateKey")).toHaveLength(1);
+    expect(first).toEqual(second);
+  });
+});
+
+describe("currentSetup", () => {
+  test("a subscription bound to another key is no setup", async () => {
+    const env = fakeEnv();
+    await ensureVapidKeys(env);
+    const subscription = new FakeSubscription(new Uint8Array(65).fill(9));
+    env.navigator.serviceWorker = {
+      ready: Promise.resolve({ pushManager: { getSubscription: async () => subscription, subscribe: async () => subscription } }),
+    };
+
+    expect(await currentSetup(PREFS, env)).toBeNull();
+  });
+
+  test("a ready that never comes throws instead of looking gone", async () => {
+    const env = fakeEnv({ readyHangs: true, readyTimeoutMs: 20 });
+    await ensureVapidKeys(env);
+    await expect(currentSetup(PREFS, env)).rejects.toThrow();
+  });
+});
+
+describe("a service worker that never becomes ready", () => {
+  test("subscribing rejects with 'unsupported'", async () => {
+    const env = fakeEnv({ readyHangs: true, readyTimeoutMs: 20 });
+    await expect(subscribePush(PREFS, env)).rejects.toThrow("unsupported");
   });
 });
 

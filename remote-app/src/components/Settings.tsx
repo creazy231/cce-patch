@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { Mac } from "../lib/macs";
 import { ensureVapidKeys } from "../lib/push";
 import { hostOf } from "../state/format";
+import { pushStatusText } from "../state/push-status";
 import type { PushState } from "../state/store";
 import { Book, ChevronRight, Laptop, Plus } from "./icons";
 import { NavBar, useApp } from "./ui";
@@ -12,7 +13,8 @@ export function Settings() {
   const { state, store } = useApp();
   // Made while Settings opens, so the tap on "Turn on notifications" can ask for permission first.
   useEffect(() => {
-    if (!state.demo && state.push.support === "ok") void ensureVapidKeys();
+    store.refreshPushSupport();
+    if (!state.demo && store.state.push.support === "ok") void ensureVapidKeys().catch(() => undefined);
   }, []);
   return (
     <div class="screen settings">
@@ -74,14 +76,6 @@ export function Settings() {
   );
 }
 
-/** What the connected Mac says about this phone's subscription. */
-function pushStatus(push: PushState, macName: string): string {
-  if (push.mac === "on") return `${macName}: on`;
-  if (push.mac === "unsupported") return `${macName}: this Mac's patch is too old for notifications`;
-  if (push.mac === "off" && push.error) return `${macName}: can't be reached right now`;
-  return `${macName}: not set up yet`;
-}
-
 function Notifications({ push, demo, macName }: { push: PushState; demo: boolean; macName: string }) {
   const { store } = useApp();
   const guidance = demo
@@ -134,7 +128,7 @@ function Notifications({ push, demo, macName }: { push: PushState; demo: boolean
       <div class="group">
         <div class="kv">
           <span>Status</span>
-          <span class="kv-value">{pushStatus(push, macName)}</span>
+          <span class="kv-value">{pushStatusText(push, macName)}</span>
         </div>
       </div>
       <p class="fine settings-fine">Other paired Macs are set up the next time the app connects to them.</p>

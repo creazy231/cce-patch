@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { RemoteError, type ClientEvents, type ClientState } from "../src/lib/client";
 import { saveMacs, selectMac, type Mac } from "../src/lib/macs";
 import type { Ack, ImageUpload, Pending, PhoneMessage, Project } from "../src/lib/protocol";
-import { ensureVapidKeys, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
+import { ensureVapidKeys, setBadgeCount, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
 import { buildTranscript } from "../src/lib/transcript";
 import type { Source } from "../src/state/source";
 import { Store } from "../src/state/store";
@@ -12,6 +12,7 @@ import { Store } from "../src/state/store";
 type Listener = (event: { state: unknown }) => void;
 const saved: Record<string, unknown> = {};
 const GLOBALS = ["window", "history", "location", "document", "localStorage"] as const;
+let fireDocument: (type: string) => void = () => {};
 
 class MemoryStorage {
   data = new Map<string, string>();
@@ -62,7 +63,17 @@ function installBrowser() {
     },
   };
   g.location = { pathname: "/", search: "", hash: "" };
-  g.document = { title: "" };
+  const documentListeners = new Map<string, Set<Listener>>();
+  fireDocument = (type: string) => documentListeners.get(type)?.forEach((l) => l({ state: null }));
+  g.document = {
+    title: "",
+    visibilityState: "hidden",
+    addEventListener: (type: string, l: Listener) => {
+      if (!documentListeners.has(type)) documentListeners.set(type, new Set());
+      documentListeners.get(type)!.add(l);
+    },
+    removeEventListener: (type: string, l: Listener) => documentListeners.get(type)?.delete(l),
+  };
   g.localStorage = new MemoryStorage();
 }
 
@@ -624,6 +635,9 @@ interface FakePushOptions {
   permission?: string;
   subscription?: boolean;
   prefs?: PushPrefs;
+  /** A service worker that never becomes ready. */
+  readyHangs?: boolean;
+  readyTimeoutMs?: number;
 }
 
 /** Browser push APIs and storage for the store; real crypto, fake service worker and cache storage. */
@@ -631,7 +645,7 @@ function fakePushEnv(options: FakePushOptions = {}) {
   const storage = new MemoryStorage();
   if (options.on) storage.setItem("cce-remote:push", "1");
   if (options.prefs) storage.setItem("cce-remote:push-prefs", JSON.stringify(options.prefs));
-  let subscription: FakePushSubscription | null = options.subscription ? new FakePushSubscription(new Uint8Array(65)) : null;
+  let subscription: FakePushSubscription | null = options.subscription ? new FakePushSubscription(null) : null;
   const pushManager = {
     async getSubscription() {
       return subscription;
@@ -647,7 +661,7 @@ function fakePushEnv(options: FakePushOptions = {}) {
   let cleared = 0;
   const env: PushEnv = {
     navigator: {
-      serviceWorker: { ready: Promise.resolve(registration) },
+      serviceWorker: { ready: options.readyHangs ? new Promise<never>(() => {}) : Promise.resolve(registration) },
       setAppBadge: async (count: number) => {
         badges.push(count);
       },
@@ -665,6 +679,8 @@ function fakePushEnv(options: FakePushOptions = {}) {
     userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
     maxTouchPoints: 5,
     standalone: () => true,
+    pushManager: true,
+    readyTimeoutMs: options.readyTimeoutMs,
     caches: caches as unknown as PushEnv["caches"],
   };
   return { env, storage, caches, badges, cleared: () => cleared, subscription: () => subscription };
@@ -695,6 +711,33 @@ function linkedStore() {
   store = new Store({ demo: false, createSource: () => fake, pushEnv: fakePushEnv().env });
   store.start();
 }
+
+/** A non-demo store with one paired Mac and its badge cache. */
+async function linkedPushStore() {
+  const push = fakePushEnv();
+  await ensureVapidKeys(push.env);
+  saveMacs([MAC_A], localStorage);
+  selectMac(MAC_A.id, localStorage);
+  store.stop();
+  history.replaceState(null, "", "/");
+  store = new Store({ demo: false, createSource: () => fake, pushEnv: push.env });
+  store.start();
+  return push;
+}
+
+const waitingProjects = (): Project[] => [
+  {
+    id: PROJECT,
+    name: "acme-api",
+    folders: [],
+    editor: "Visual Studio Code",
+    claudeOpen: true,
+    sessions: [
+      { id: "s1", title: "one", lastModified: 1, state: "waiting", live: true, pendingCount: 1 },
+      { id: "s2", title: "two", lastModified: 2, state: "waiting", live: true, pendingCount: 1 },
+    ],
+  },
+];
 
 describe("notifications", () => {
   test("while on, every welcome sends push_set", async () => {
@@ -772,6 +815,77 @@ describe("notifications", () => {
     await saving;
   });
 
+  test("a timing-out currentSetup keeps notifications on", async () => {
+    await pushStore({ on: true, subscription: true, readyHangs: true, readyTimeoutMs: 20 });
+    welcome();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(store.state.push.on).toBe(true);
+    expect(store.state.push.mac).toBe("unknown");
+  });
+
+  test("enablePush ends not busy when the service worker never becomes ready", async () => {
+    await pushStore({ subscription: false, readyHangs: true, readyTimeoutMs: 20 });
+    const enabling = store.enablePush();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await enabling;
+    expect(store.state.push.busy).toBe(false);
+    expect(store.state.push.on).toBe(false);
+  });
+
+  test("a pref change whose setup read times out stays saved here", async () => {
+    const push = await pushStore({ on: true, subscription: true, readyHangs: true, readyTimeoutMs: 20 });
+    await store.setPushPref("done", false);
+
+    expect(store.state.push.prefs.done).toBe(false);
+    expect(JSON.parse(push.storage.getItem("cce-remote:push-prefs")!).done).toBe(false);
+    expect(fake.count("pushSet")).toBe(0);
+  });
+
+  test("a push_off test push re-sends the setup and retries", async () => {
+    await pushStore({ on: true, subscription: true });
+    const sending = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_off"));
+    await flush();
+
+    expect(fake.count("pushSet")).toBe(1);
+    expect((fake.last("pushSet").args[0] as PushSetup).subscription.endpoint).toBe("https://push.example/abc");
+    fake.last("pushSet").resolve!(ack());
+    await flush();
+
+    expect(fake.count("pushTest")).toBe(2);
+    fake.last("pushTest").resolve!(ack({ status: 201 }));
+    await sending;
+    expect(store.state.toasts.at(-1)).toMatchObject({ text: "Test notification sent.", tone: "success" });
+  });
+
+  test("a push_off that stays off says to turn notifications off and on again", async () => {
+    await pushStore({ on: true, subscription: true });
+    const sending = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_off"));
+    await flush();
+    fake.last("pushSet").resolve!(ack());
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_off"));
+    await sending;
+
+    expect(store.state.toasts.at(-1)?.text).toBe(
+      "example-mac doesn't have this iPhone's notification setup yet. Turn notifications off and on again.",
+    );
+  });
+
+  test("an old Mac's unknown_type says its patch is too old", async () => {
+    await pushStore({ on: true, subscription: true });
+    const sending = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("unknown_type"));
+    await sending;
+
+    expect(store.state.push.mac).toBe("unsupported");
+    expect(store.state.toasts.at(-1)?.text).toBe("example-mac's patch is too old for notifications. Update the patch on the Mac.");
+  });
+
   test("a test push says how it went", async () => {
     await pushStore({ on: true, subscription: true });
 
@@ -813,6 +927,22 @@ describe("notifications", () => {
     expect(fake.count("subscribe")).toBe(before);
   });
 
+  test("refreshPushSupport follows the permission when it changes", async () => {
+    const push = await pushStore({ on: true, subscription: true, permission: "denied" });
+    expect(store.state.push.support).toBe("denied");
+    push.env.Notification!.permission = "default";
+    store.refreshPushSupport();
+    expect(store.state.push.support).toBe("ok");
+  });
+
+  test("becoming visible refreshes the support", async () => {
+    const push = await pushStore({ on: true, subscription: true, permission: "denied" });
+    push.env.Notification!.permission = "default";
+    (globalThis.document as unknown as { visibilityState: string }).visibilityState = "visible";
+    fireDocument("visibilitychange");
+    expect(store.state.push.support).toBe("ok");
+  });
+
   test("projects update the badge", async () => {
     const push = fakePushEnv();
     store.stop();
@@ -837,5 +967,29 @@ describe("notifications", () => {
     expect(push.badges).toEqual([2]);
     expect(push.caches.map("cce-badge")).toEqual({ "demo-mac": 2 });
     expect(document.title).toBe("(2) CCE Remote");
+  });
+});
+
+describe("the badge when Macs go away", () => {
+  test("removing a Mac clears its badge entry", async () => {
+    const push = await linkedPushStore();
+    fake.emit("projects", waitingProjects());
+    await flush();
+    expect(push.caches.map("cce-badge")).toEqual({ devA: 2 });
+
+    store.removeMac(MAC_A.id);
+    await flush();
+    expect(push.caches.map("cce-badge")).toEqual({});
+  });
+
+  test("with no Mac selected, no badge is written for the empty key", async () => {
+    const push = await linkedPushStore();
+    await setBadgeCount("", 5, push.env); // an entry left from before this fix
+    const cleared = push.cleared();
+
+    store.removeMac(MAC_A.id);
+    await flush();
+    expect(push.caches.map("cce-badge")).toEqual({ "": 5 });
+    expect(push.cleared()).toBe(cleared);
   });
 });

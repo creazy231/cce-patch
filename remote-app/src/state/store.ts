@@ -334,6 +334,7 @@ export class Store {
     if (this.started) return;
     this.started = true;
     window.addEventListener("popstate", this.onPopState);
+    document.addEventListener("visibilitychange", this.onVisibility);
 
     const pairText = pairFragment(location.hash);
     const link = parseOpenLink(location.search);
@@ -354,6 +355,7 @@ export class Store {
 
   stop(): void {
     window.removeEventListener("popstate", this.onPopState);
+    document.removeEventListener("visibilitychange", this.onVisibility);
     this.dropSource();
     this.started = false;
   }
@@ -401,6 +403,10 @@ export class Store {
       this.navigate(route, "replace");
     }
   }
+
+  private readonly onVisibility = (): void => {
+    if (document.visibilityState === "visible") this.refreshPushSupport();
+  };
 
   private readonly onPopState = (event: PopStateEvent): void => {
     const state = event.state as { cce?: unknown; i?: unknown } | null;
@@ -514,13 +520,25 @@ export class Store {
 
   // ---- notifications ----
 
+  /** The permission can change while the app is in the background (the Settings app): recompute it. */
+  refreshPushSupport(): void {
+    const support = pushSupport(this.pushEnv);
+    if (support !== this.state.push.support) this.set({ push: { ...this.state.push, support } });
+  }
+
   /**
    * A Mac is ready for requests. While notifications are on, the subscription, keys and prefs are sent
    * again; a subscription or permission that went away turns them off here.
    */
   private async onWelcome(_frame: WelcomeFrame): Promise<void> {
     if (!this.state.push.on) return;
-    const setup = await currentSetup(this.state.push.prefs, this.pushEnv);
+    let setup: PushSetup | null;
+    try {
+      setup = await currentSetup(this.state.push.prefs, this.pushEnv);
+    } catch {
+      // A read that timed out isn't "gone": leave notifications on until the next welcome.
+      return;
+    }
     if (!setup) {
       setPushOn(false, this.pushEnv);
       this.set({ push: { ...this.state.push, on: false, busy: false, mac: "unknown", error: null } });
@@ -580,24 +598,53 @@ export class Store {
     savePushPrefs(prefs, this.pushEnv);
     this.set({ push: { ...this.state.push, prefs } });
     if (!this.state.push.on || !this.source || this.state.conn !== "open") return;
-    const setup = await currentSetup(prefs, this.pushEnv);
+    let setup: PushSetup | null;
+    try {
+      setup = await currentSetup(prefs, this.pushEnv);
+    } catch {
+      // A read that timed out isn't "gone": the pref stays saved here and goes out on the next welcome.
+      return;
+    }
     if (setup) await this.sendPushSetup(setup);
   }
 
   /** Asks the connected Mac for a test notification and says how it went. */
   async testPush(): Promise<void> {
-    if (!this.source || this.state.conn !== "open") {
+    const source = this.source;
+    if (!source || this.state.conn !== "open") {
       this.toast(errorText("not_connected", this.macName), "error");
       return;
     }
     try {
-      await this.source.pushTest();
+      await source.pushTest();
       this.toast("Test notification sent.", "success");
     } catch (error) {
       const code = errorCode(error);
       const status = error instanceof RemoteError ? error.status : undefined;
       if (code === "push_off") {
-        this.toast(`Notifications are off on ${this.macName}. Turn them on in the Connection tab on the Mac.`, "error");
+        // The Mac may have lost this phone's subscription: send it again and retry once.
+        let setup: PushSetup | null = null;
+        if (this.state.push.on) {
+          try {
+            setup = await currentSetup(this.state.push.prefs, this.pushEnv);
+          } catch {
+            setup = null;
+          }
+        }
+        if (setup) {
+          await this.sendPushSetup(setup);
+          try {
+            await source.pushTest();
+            this.toast("Test notification sent.", "success");
+            return;
+          } catch {
+            // The Mac still doesn't have it.
+          }
+        }
+        this.toast(`${this.macName} doesn't have this iPhone's notification setup yet. Turn notifications off and on again.`, "error");
+      } else if (code === "unknown_type") {
+        this.set({ push: { ...this.state.push, mac: "unsupported", error: null } });
+        this.toast(`${this.macName}'s patch is too old for notifications. Update the patch on the Mac.`, "error");
       } else if (code === "push_gone") {
         setPushOn(false, this.pushEnv);
         this.set({ push: { ...this.state.push, on: false, mac: "unknown", error: null } });
@@ -983,6 +1030,8 @@ export class Store {
     }
     const macs = forgetMac(id);
     this.set({ macs });
+    // This Mac's waiting count is gone with it.
+    void setBadgeCount(mac.deviceId, 0, this.pushEnv);
     if (this.state.macId === id) {
       const next = selectedMacId();
       this.connectTo(next);
@@ -1001,7 +1050,9 @@ export class Store {
 
   /** The home-screen badge sums the waiting sessions of every paired Mac, as last heard from each. */
   private updatePushBadge(projects: readonly Project[]): void {
-    void setBadgeCount(this.mac?.deviceId ?? "", waitingCount(projects), this.pushEnv);
+    const mac = this.mac;
+    if (!mac) return;
+    void setBadgeCount(mac.deviceId, waitingCount(projects), this.pushEnv);
   }
 
   toast(text: string, tone: Toast["tone"] = "info"): void {
