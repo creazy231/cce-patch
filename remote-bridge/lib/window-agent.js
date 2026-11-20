@@ -1321,23 +1321,28 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * Reports the prompts that are open right now as `open` events, one per session, so a hub that has just
-   * taken over (or remote access that was just turned on) knows what is already waiting. Old prompts are
-   * counted, not announced: no `waiting` is emitted. Nothing while remote access is off.
+   * Reports the prompts that are open right now, so a hub that has just taken over (or remote access that
+   * was just turned on) knows what is already waiting. A live prompt that was never announced (remote
+   * access was off, or no hub listened) is emitted as `waiting` first, with the same title and prompt as a
+   * fresh one, and marked; prompts already announced to a hub are only counted. Then `open` per session.
+   * Nothing while remote access is off.
    */
   replayAttention() {
     if (!this._enabled) return;
-    /** @type {Map<string, string[]>} session id → its live request ids */
+    /** @type {Map<string, PendingEntry[]>} session id → its live prompts */
     const open = new Map();
     for (const entry of this._pending.values()) {
       if (!this._isLive(entry)) continue;
       const sessionId = this._entrySession(entry);
       if (!sessionId) continue;
-      const ids = open.get(sessionId);
-      if (ids) ids.push(entry.pending.requestId);
-      else open.set(sessionId, [entry.pending.requestId]);
+      const entries = open.get(sessionId);
+      if (entries) entries.push(entry);
+      else open.set(sessionId, [entry]);
     }
-    for (const [session, requestIds] of open) this._emitAttention({ kind: 'open', session, requestIds });
+    for (const [sessionId, entries] of open) {
+      for (const entry of entries) if (!this._announced.has(entry.pending.requestId)) this._emitWaiting(sessionId, entry.pending);
+    }
+    for (const [sessionId, entries] of open) this._emitAttention({ kind: 'open', session: sessionId, requestIds: entries.map((entry) => entry.pending.requestId) });
   }
 
   /**
@@ -1814,11 +1819,13 @@ class WindowAgent extends EventEmitter {
 
   /**
    * A prompt appeared in a session: `waiting`, once per request id (a request the host delivers twice is news
-   * once). Not while remote access is off (the id is not noted then either).
+   * once), while remote access is on and at least one `attention` listener is there. A prompt that appeared
+   * while remote access was off, or while no hub listened, is not marked: replayAttention() announces it.
    * @param {string} sessionId @param {Pending} pending
    */
   _emitWaiting(sessionId, pending) {
     if (!this._enabled || this._announced.has(pending.requestId)) return;
+    if (this.listenerCount('attention') === 0) return;
     this._announced.add(pending.requestId);
     for (const oldest of this._announced) {
       if (this._announced.size <= AGENT_LIMITS.announced) break;

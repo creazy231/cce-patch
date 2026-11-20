@@ -989,13 +989,39 @@ describe("attention", () => {
     expect(attention).toEqual([]);
   });
 
-  test("turning remote access on reports the open prompts", async () => {
+  test("a prompt announced to a hub is only counted on replay", async () => {
+    const { agent, sidebar, attention } = await listedWindow();
+    const asked = sidebar.requestPermission("c1", bash);
+    expect(waitings(attention)).toHaveLength(1);
+    attention.length = 0;
+    agent.replayAttention();
+    expect(waitings(attention)).toEqual([]); // no second waiting
+    expect(opens(attention)).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+  });
+
+  test("a prompt that appeared while no hub listened is announced on replay", async () => {
+    const { agent, sidebar } = await listedWindow();
+    agent.removeAllListeners("attention");
+    const asked = sidebar.requestPermission("c1", bash);
+    const heard: any[] = [];
+    agent.on("attention", (ev: any) => heard.push(ev));
+    agent.replayAttention();
+    expect(waitings(heard)).toEqual([{ kind: "waiting", session: "s1", requestId: asked.requestId, title: "Fix the flaky test", prompt: { kind: "tool", toolName: "Bash", text: "npm test" } }]);
+    expect(opens(heard)).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+    heard.length = 0;
+    agent.replayAttention();
+    expect(waitings(heard)).toEqual([]); // announced once
+    expect(opens(heard)).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+  });
+
+  test("a prompt that appeared while remote access was off is announced when it turns on", async () => {
     const { agent, sidebar, attention } = await listedWindow();
     agent.setEnabled(false);
     const asked = sidebar.requestPermission("c1", bash);
     expect(attention).toEqual([]);
     agent.setEnabled(true);
-    expect(attention).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+    expect(waitings(attention)).toEqual([{ kind: "waiting", session: "s1", requestId: asked.requestId, title: "Fix the flaky test", prompt: { kind: "tool", toolName: "Bash", text: "npm test" } }]);
+    expect(opens(attention)).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
   });
 
   test.each([

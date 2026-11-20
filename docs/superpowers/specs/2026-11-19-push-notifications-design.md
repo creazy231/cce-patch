@@ -93,6 +93,7 @@ These are emitted like the other events, only while remote access is on.
     - for a tool, the key argument: the command for Bash, the file's base name for file tools, the URL for WebFetch, the query for WebSearch, otherwise the first text field;
     - '' for a plan or a dialog.
   - It is cut to 140 characters.
+  - **Never announced.** A prompt that appeared while remote access was off, or while no hub listened, is announced as `waiting` when a hub starts listening (`replayAttention`); one already announced to a hub is only counted.
 - **`{kind: 'open', session, requestIds}`** fires whenever the list of a session's open prompts changes. `requestIds` is the list as it is now, often empty once answered here or on the phone.
 - **`{kind: 'done', session, title, isError, durationMs, text}`** fires when a `result` ends a turn. `text` is the start of the result text (140 characters).
 
@@ -122,6 +123,7 @@ These are emitted like the other events, only while remote access is on.
   - `mac` is the device id. The app knows each Mac by the device id it got there.
   - `tag` is `<mac>:<project>:<session>`, so a session has one notification at a time.
   - `url` is `/?mac=<id>&project=<id>&session=<id>`.
+  - **Long ids.** A tag over 128 characters becomes `cce:` + the first 32 characters of base64url(sha256(`${mac}\n${project}\n${session}`)), still one stable tag per session; a url over 1024 characters becomes `/`, so the app opens on its home screen.
   - `badge` is the number of sessions that wait on this Mac.
   - **With `details`:**
     - title: the project name.

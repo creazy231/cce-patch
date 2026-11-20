@@ -37,6 +37,8 @@ const MAX_SUBJECT_CHARS = 1024;
 const TITLE_CHARS = 60;
 const SESSION_TITLE_CHARS = 80;
 const LINE_CHARS = 160;
+const TAG_CHARS = 128;
+const URL_CHARS = 1024;
 
 /**
  * @typedef {{
@@ -107,6 +109,11 @@ function prefOn(prefs, key) {
 /** @param {string} kind @param {string} project @param {string} session */
 function topicOf(kind, project, session) {
   return b64url(crypto.createHash('sha256').update(`${kind}\n${project}\n${session}`).digest()).slice(0, 32);
+}
+
+/** A session's tag when its readable one is too long: stable, so a newer push still replaces an older one. @param {string} mac @param {string} project @param {string} session */
+function hashedTag(mac, project, session) {
+  return `cce:${b64url(crypto.createHash('sha256').update(`${mac}\n${project}\n${session}`).digest()).slice(0, 32)}`;
 }
 
 /** @param {unknown} state @param {string} id @returns {Record<string, any> | undefined} */
@@ -195,7 +202,9 @@ function normalizePushFrame(frame, allowEndpoint) {
 /**
  * Builds a push payload as JSON. With `details`, the first body line is the session title and the
  * second says what happened; without it both are generic. The test payload is fixed. Every cut is by
- * code point, and an over-long body is shortened until the JSON fits `maxPayloadBytes`.
+ * code point, and an over-long body, then title, is shortened until the JSON fits `maxPayloadBytes`.
+ * The tag and url are never cut: a readable tag over TAG_CHARS characters becomes a stable hash, and
+ * an url over URL_CHARS becomes `/`, so a long id opens the app at home instead of a broken link.
  * @param {{
  *   kind: 'waiting' | 'done' | 'test',
  *   details?: boolean,
@@ -250,13 +259,15 @@ function buildPayload({ kind, details, mac, project, projectName, session, ev, b
     } else {
       body = kind === 'done' ? 'A session finished' : 'A session needs your input';
     }
+    const tag = `${macText}:${projectText}:${sessionText}`;
+    const url = `/?mac=${encodeURIComponent(macText)}&project=${encodeURIComponent(projectText)}&session=${encodeURIComponent(sessionText)}`;
     payload = {
       v: 1,
       kind,
       title,
       body,
-      tag: `${macText}:${projectText}:${sessionText}`,
-      url: `/?mac=${encodeURIComponent(macText)}&project=${encodeURIComponent(projectText)}&session=${encodeURIComponent(sessionText)}`,
+      tag: Array.from(tag).length <= TAG_CHARS ? tag : hashedTag(macText, projectText, sessionText),
+      url: url.length <= URL_CHARS ? url : '/',
       mac: macText,
       badge: badgeText,
     };
@@ -264,9 +275,9 @@ function buildPayload({ kind, details, mac, project, projectName, session, ev, b
 
   let json = JSON.stringify(payload);
   const max = maxPayloadBytes ?? NOTIFIER_LIMITS.maxPayloadBytes;
-  // The body is what is shortened first. If the identifiers alone are too big for that, the other
-  // fields follow in the same way, so the payload always fits.
-  for (const field of /** @type {const} */ (['body', 'title', 'tag', 'url'])) {
+  // The body is what is shortened first, then the title. The tag, url and mac are already bounded,
+  // so the two of them always bring the payload under the limit.
+  for (const field of /** @type {const} */ (['body', 'title'])) {
     if (Buffer.byteLength(json) <= max) break;
     let length = Array.from(payload[field]).length;
     while (Buffer.byteLength(json) > max && length > 0) {

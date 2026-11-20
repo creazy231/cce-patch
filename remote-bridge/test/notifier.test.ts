@@ -582,4 +582,37 @@ describe("buildPayload", () => {
       expect(payload).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     }
   });
+
+  test("normal ids keep a readable tag and the session link", () => {
+    const mac = "dev-uuid";
+    const project = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    const session = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    const payload = JSON.parse(buildPayload({ mac, project, session, projectName: "cce-patch", kind: "waiting", details: true, ev: waiting(session, "r1"), badge: 0 }));
+    expect(payload.tag).toBe(`${mac}:${project}:${session}`);
+    expect(payload.url).toBe(`/?mac=${mac}&project=${project}&session=${session}`);
+  });
+
+  test("very long ids get a hashed tag and a home link, never a cut one", () => {
+    const session = "é".repeat(200) + "🎉".repeat(28);
+    const input = {
+      mac: "dev1",
+      project: "p".repeat(200),
+      session,
+      projectName: "cce-patch",
+      kind: "waiting" as const,
+      details: true,
+      ev: waiting(session, "r1", { kind: "question", text: "Q".repeat(2000) }, "T".repeat(2000)),
+      badge: 1,
+    };
+    const json = buildPayload(input);
+    const payload = JSON.parse(json);
+    expect(payload.tag).toMatch(/^cce:[A-Za-z0-9_-]{32}$/);
+    expect(payload.tag).toBe(`cce:${crypto.createHash("sha256").update(`dev1\n${input.project}\n${session}`).digest("base64url").slice(0, 32)}`);
+    expect(payload.tag).toBe(JSON.parse(buildPayload(input)).tag);
+    expect(payload.url).toBe("/");
+    expect(Buffer.byteLength(json)).toBeLessThanOrEqual(3000);
+    expect(JSON.parse(json)).toMatchObject({ v: 1, kind: "waiting" });
+    expect(json).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(json).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
 });
