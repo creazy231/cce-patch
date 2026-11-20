@@ -1009,7 +1009,7 @@ class Hub extends EventEmitter {
       this._notifier.test(phone.deviceId).then(
         (result) => {
           if (result.ok) ack({ ok: true });
-          else ack({ ok: false, error: result.error, ...(result.status !== undefined ? { status: result.status } : {}) });
+          else ack({ ok: false, error: result.error, ...(result.status !== undefined ? { status: result.status } : {}), ...(typeof result.reason === 'string' && result.reason !== '' ? { reason: result.reason } : {}) });
         },
         () => ack({ ok: false, error: 'push_failed' }),
       );

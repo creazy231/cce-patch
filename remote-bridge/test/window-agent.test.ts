@@ -972,6 +972,32 @@ describe("attention", () => {
     expect(attention[1]).toMatchObject({ session: "s2", requestId: next.requestId, title: "Add dark mode" });
   });
 
+  test("replayAttention reports the open prompts", async () => {
+    const { agent, sidebar, attention } = await listedWindow();
+    agent.replayAttention();
+    expect(attention).toEqual([]); // no prompts
+
+    const asked = sidebar.requestPermission("c1", bash);
+    attention.length = 0;
+    agent.replayAttention();
+    expect(attention).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+    expect(attention.every((ev) => ev.kind === "open")).toBe(true); // no waiting
+
+    agent.setEnabled(false);
+    attention.length = 0;
+    agent.replayAttention();
+    expect(attention).toEqual([]);
+  });
+
+  test("turning remote access on reports the open prompts", async () => {
+    const { agent, sidebar, attention } = await listedWindow();
+    agent.setEnabled(false);
+    const asked = sidebar.requestPermission("c1", bash);
+    expect(attention).toEqual([]);
+    agent.setEnabled(true);
+    expect(attention).toEqual([{ kind: "open", session: "s1", requestIds: [asked.requestId] }]);
+  });
+
   test.each([
     ["Bash: the command, on one line", "Bash", { command: "git  status\n  --short", description: "x" }, "git status --short"],
     ["Write: the file's base name", "Write", { file_path: "/work/demo/src/new.ts", content: "x" }, "new.ts"],
@@ -1023,7 +1049,7 @@ describe("attention", () => {
     expect(attention.at(-1)).toMatchObject({ kind: "done", text: `${"R".repeat(140)}…` });
   });
 
-  test("the title is the live one, else the listed custom title or summary, else New session; cut to one short line", async () => {
+  test("attention titles match the sessions list", async () => {
     const { provider, sidebar, tab, attention } = await listedWindow({
       sessions: [
         { id: "s1", summary: "Fix the flaky test", lastModified: 1_000 },
@@ -1043,7 +1069,7 @@ describe("attention", () => {
     provider.sessionStates.set("s1", { info: { sessionId: "s1", state: "running", title: "" } });
     expect(titleOf(sidebar, "c1")).toBe("Fix the flaky test");
     sidebar.openChannel("c3", "s3"); // listed, but without any title
-    expect(titleOf(sidebar, "c3")).toBe("New session");
+    expect(titleOf(sidebar, "c3")).toBe("Untitled");
     sidebar.openChannel("c7", "s-unlisted"); // not listed at all
     expect(titleOf(sidebar, "c7")).toBe("New session");
 

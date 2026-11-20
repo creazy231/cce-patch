@@ -48,7 +48,7 @@ const LINE_CHARS = 160;
  *   createdAt: number,
  * }} PushRecord
  * @typedef {{ ok: true } | { ok: false, error: string }} SetResult
- * @typedef {{ ok: true } | { ok: false, error: string, status?: number }} TestResult
+ * @typedef {{ ok: true } | { ok: false, error: string, status?: number, reason?: string }} TestResult
  * @typedef {{
  *   state: () => any,
  *   updateState: (fn: (state: any) => void) => unknown,
@@ -303,6 +303,8 @@ class Notifier {
       urgency: { ...NOTIFIER_LIMITS.urgency, ...(isRecord(limits.urgency) ? limits.urgency : {}) },
     };
     this._closed = false;
+    // Every send gets its signal; close() aborts the ones in flight.
+    this._abort = new AbortController();
     /** @type {Map<string, { key: string, project: string, session: string, ids: Set<string>, timers: Map<string, any> }>} */
     this._sessions = new Map();
     /** @type {Set<string>} */
@@ -478,12 +480,13 @@ class Notifier {
       this._removeGone(deviceId, record.endpoint);
       return { ok: false, error: 'push_gone' };
     }
-    return { ok: false, error: 'push_failed', status: result.status };
+    return { ok: false, error: 'push_failed', status: result.status, ...(result.reason !== undefined ? { reason: result.reason } : {}) };
   }
 
-  /** Stops every timer; no send result is acted on afterwards. */
+  /** Stops every timer and aborts the sends in flight; no send result is acted on afterwards. */
   close() {
     this._closed = true;
+    this._abort.abort();
     for (const entry of this._sessions.values()) {
       for (const timer of entry.timers.values()) this._timers.clearTimeout(timer);
     }
@@ -563,14 +566,15 @@ class Notifier {
     this._cap.set(deviceId, times);
   }
 
-  /** @param {string} deviceId @param {unknown} endpoint @param {number} status */
-  _logFailure(deviceId, endpoint, status) {
+  /** @param {string} deviceId @param {unknown} endpoint @param {number} status @param {string} [reason] */
+  _logFailure(deviceId, endpoint, status, reason) {
     const now = this._now();
     const logged = this._failLogged.get(deviceId);
     if (logged !== undefined && now - logged < this._limits.failLogEveryMs) return;
     this._failLogged.set(deviceId, now);
     const host = hostOf(endpoint);
-    this._log(`push to ${host || 'the push service'} failed (status ${status})`, 'warn');
+    const detail = status === 0 && typeof reason === 'string' && reason !== '' ? reason : `status ${status}`;
+    this._log(`push to ${host || 'the push service'} failed (${detail})`, 'warn');
   }
 
   /** Removes a subscription the push service no longer knows, if the stored endpoint is still that one. @param {string} deviceId @param {unknown} endpoint */
@@ -589,9 +593,11 @@ class Notifier {
   /** Sends one push and normalizes what comes back; never rejects. @param {any} push */
   async _sendPush(push) {
     try {
-      const result = await this._send(push, this._sendOptions);
+      const result = await this._send(push, { ...this._sendOptions, signal: this._abort.signal });
       if (!isRecord(result)) return { ok: false, status: 0, gone: false };
-      return { ok: result.ok === true, status: finite(result.status), gone: result.gone === true };
+      const status = finite(result.status);
+      const reason = status === 0 && typeof result.reason === 'string' && result.reason !== '' ? result.reason : undefined;
+      return { ok: result.ok === true, status, gone: result.gone === true, ...(reason !== undefined ? { reason } : {}) };
     } catch {
       return { ok: false, status: 0, gone: false };
     }
@@ -652,7 +658,7 @@ class Notifier {
         this._removeGone(deviceId, record.endpoint);
         continue;
       }
-      if (!result.ok) this._logFailure(deviceId, record.endpoint, result.status);
+      if (!result.ok) this._logFailure(deviceId, record.endpoint, result.status, result.reason);
     }
   }
 

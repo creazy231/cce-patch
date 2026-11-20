@@ -12,6 +12,7 @@ const b = (text: string) => Buffer.from(text, "base64url");
 const APPLE = "https://web.push.apple.com/QAbc";
 const SUBJECT = "https://app.example.test";
 const FAILED = { ok: false, status: 0, gone: false };
+const failedWith = (reason: string) => ({ ...FAILED, reason });
 
 // --- keys the way a browser makes them ------------------------------------------------------
 
@@ -544,14 +545,14 @@ describe("sendPush", () => {
     // a request that fails
     {
       const { request } = fakeRequest((req) => queueMicrotask(() => req.emit("error", new Error("socket hang up"))));
-      expect(await sendPush(makePush().push, { request })).toEqual(FAILED);
+      expect(await sendPush(makePush().push, { request })).toEqual(failedWith("network"));
     }
 
     // a request that never answers
     {
       const { request, calls } = fakeRequest(() => {});
       const started = Date.now();
-      expect(await sendPush(makePush().push, { request, timeoutMs: 50 })).toEqual(FAILED);
+      expect(await sendPush(makePush().push, { request, timeoutMs: 50 })).toEqual(failedWith("timeout"));
       expect(Date.now() - started).toBeLessThan(1000);
       expect(calls[0].destroyed).toBe(true);
     }
@@ -559,14 +560,14 @@ describe("sendPush", () => {
     // an endpoint the allowlist refuses
     for (const endpoint of ["https://example.com/push", "http://web.push.apple.com/x", "https://127.0.0.1/x", "not a url", 42, undefined]) {
       const { request, calls } = fakeRequest();
-      expect(await sendPush(makePush({ endpoint }).push, { request })).toEqual(FAILED);
+      expect(await sendPush(makePush({ endpoint }).push, { request })).toEqual(failedWith("refused"));
       expect(calls).toHaveLength(0);
     }
 
     // a payload that does not fit
     {
       const { request, calls } = fakeRequest();
-      expect(await sendPush(makePush({ payload: "x".repeat(5000) }).push, { request })).toEqual(FAILED);
+      expect(await sendPush(makePush({ payload: "x".repeat(5000) }).push, { request })).toEqual(failedWith("invalid"));
       expect(calls).toHaveLength(0);
     }
   });
@@ -576,14 +577,14 @@ describe("sendPush", () => {
     const { request, calls } = fakeRequest();
     expect(await sendPush(makePush({ payload: "x".repeat(3993) }).push, { request })).toEqual({ ok: true, status: 201, gone: false });
     expect(calls[0].body).toHaveLength(4096);
-    expect(await sendPush(makePush({ payload: "x".repeat(3994) }).push, { request })).toEqual(FAILED);
+    expect(await sendPush(makePush({ payload: "x".repeat(3994) }).push, { request })).toEqual(failedWith("too_large"));
     expect(calls).toHaveLength(1);
   });
 
   test("the size limit counts bytes, not characters", async () => {
     const { request, calls } = fakeRequest();
     // 1000 emoji are 1000 characters (2000 UTF-16 units) and 4000 bytes
-    expect(await sendPush(makePush({ payload: "🎉".repeat(1000) }).push, { request })).toEqual(FAILED);
+    expect(await sendPush(makePush({ payload: "🎉".repeat(1000) }).push, { request })).toEqual(failedWith("too_large"));
     expect(calls).toHaveLength(0);
   });
 
@@ -591,7 +592,7 @@ describe("sendPush", () => {
     const local = "http://127.0.0.1:8123/push/abc";
     const { push, subscriber } = makePush({ endpoint: local });
     const refused = fakeRequest();
-    expect(await sendPush(push, { request: refused.request })).toEqual(FAILED); // the default allowlist says no
+    expect(await sendPush(push, { request: refused.request })).toEqual(failedWith("refused")); // the default allowlist says no
     expect(refused.calls).toHaveLength(0);
 
     const allowed = fakeRequest();
@@ -601,7 +602,7 @@ describe("sendPush", () => {
     expect(decrypt(allowed.calls[0].body, subscriber).toString()).toBe(push.payload);
 
     const strict = fakeRequest();
-    expect(await sendPush(makePush().push, { request: strict.request, allowEndpoint: () => false })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request: strict.request, allowEndpoint: () => false })).toEqual(failedWith("refused"));
     expect(strict.calls).toHaveLength(0);
     // the injected check is asked about the push's endpoint
     const asked: unknown[] = [];
@@ -611,33 +612,103 @@ describe("sendPush", () => {
 
   test("never rejects, whatever it is given or whatever fails", async () => {
     const { request, calls } = fakeRequest();
-    for (const push of [undefined, null, {}, 42, "push", [], { endpoint: APPLE }]) {
-      expect(await sendPush(push as any, { request })).toEqual(FAILED);
+    const pushes: Array<[unknown, string]> = [
+      [undefined, "invalid"],
+      [null, "invalid"],
+      [{}, "refused"],
+      [42, "refused"],
+      ["push", "refused"],
+      [[], "refused"],
+      [{ endpoint: APPLE }, "invalid"],
+    ];
+    for (const [push, reason] of pushes) {
+      expect(await sendPush(push as any, { request })).toEqual(failedWith(reason));
     }
-    for (const overrides of [
-      { keys: undefined },
-      { keys: { p256dh: bytes(64), auth: bytes(16) } },
-      { keys: { p256dh: bytes(65), auth: bytes(16) } }, // not a point on the curve
-      { vapid: undefined },
-      { vapid: { publicKey: "x", privateJwk: { kty: "EC" } } },
-      { subject: undefined, vapid: null },
-      { payload: undefined },
-      { payload: 42 },
-      { ttl: undefined },
-      { ttl: -1 },
-      { ttl: 1.5 },
-      { ttl: "3600" },
-    ]) {
-      expect(await sendPush(makePush(overrides).push, { request })).toEqual(FAILED);
+    const overrides: Array<[Record<string, unknown>, string]> = [
+      [{ keys: undefined }, "invalid"],
+      [{ keys: { p256dh: bytes(64), auth: bytes(16) } }, "invalid"],
+      [{ keys: { p256dh: bytes(65), auth: bytes(16) } }, "invalid"], // not a point on the curve
+      [{ vapid: undefined }, "invalid"],
+      [{ vapid: { publicKey: "x", privateJwk: { kty: "EC" } } }, "invalid"],
+      [{ subject: undefined }, "invalid"],
+      [{ vapid: null }, "invalid"],
+      [{ payload: undefined }, "invalid"],
+      [{ payload: 42 }, "invalid"],
+      [{ ttl: undefined }, "invalid"],
+      [{ ttl: -1 }, "invalid"],
+      [{ ttl: 1.5 }, "invalid"],
+      [{ ttl: "3600" }, "invalid"],
+    ];
+    for (const [override, reason] of overrides) {
+      expect(await sendPush(makePush(override).push, { request })).toEqual(failedWith(reason));
     }
     expect(calls).toHaveLength(0);
 
     // collaborators that throw
-    expect(await sendPush(makePush().push, { request, allowEndpoint: () => { throw new Error("boom"); } })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request, allowEndpoint: () => { throw new Error("boom"); } })).toEqual(failedWith("invalid"));
     const throwing = (() => { throw new Error("invalid header value"); }) as any;
-    expect(await sendPush(makePush().push, { request: throwing })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request: throwing })).toEqual(failedWith("invalid"));
     const failing = fakeRequest((req) => req.emit("error", new Error("refused")));
-    expect(await sendPush(makePush().push, { request: failing.request })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request: failing.request })).toEqual(failedWith("network"));
+  });
+
+  test("sendPush refuses a push without a subject or VAPID keys", async () => {
+    const vapid = makeVapid();
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["a missing subject", { subject: undefined }],
+      ["an empty subject", { subject: "" }],
+      ["no publicKey", { vapid: { privateJwk: vapid.privateJwk } }],
+      ["no privateJwk", { vapid: { publicKey: vapid.publicKey } }],
+    ];
+    for (const [what, overrides] of cases) {
+      const { request, calls } = fakeRequest();
+      expect({ what, result: await sendPush(makePush(overrides).push, { request }) }).toEqual({ what, result: failedWith("invalid") });
+      expect({ what, calls: calls.length }).toEqual({ what, calls: 0 });
+    }
+  });
+
+  test("a failed push says why", async () => {
+    const refused = fakeRequest();
+    expect(await sendPush(makePush({ endpoint: "https://example.com/push" }).push, { request: refused.request })).toEqual(failedWith("refused"));
+    expect(refused.calls).toHaveLength(0);
+
+    const tooLarge = fakeRequest();
+    expect(await sendPush(makePush({ payload: "x".repeat(3994) }).push, { request: tooLarge.request })).toEqual(failedWith("too_large"));
+    expect(tooLarge.calls).toHaveLength(0);
+
+    const invalid = fakeRequest();
+    expect(await sendPush(makePush({ ttl: -1 }).push, { request: invalid.request })).toEqual(failedWith("invalid"));
+    expect(invalid.calls).toHaveLength(0);
+
+    const network = fakeRequest((req) => queueMicrotask(() => req.emit("error", new Error("socket hang up"))));
+    expect(await sendPush(makePush().push, { request: network.request })).toEqual(failedWith("network"));
+
+    const timeout = fakeRequest(() => {});
+    expect(await sendPush(makePush().push, { request: timeout.request, timeoutMs: 30 })).toEqual(failedWith("timeout"));
+    expect(timeout.calls[0].destroyed).toBe(true);
+
+    const noStatus = fakeRequest((_req, answer) => answer(0)); // an answer without a status
+    expect(await sendPush(makePush().push, { request: noStatus.request })).toEqual(failedWith("network"));
+  });
+
+  test("an aborted send makes no request", async () => {
+    const { request, calls } = fakeRequest();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await sendPush(makePush().push, { request, signal: controller.signal })).toEqual(failedWith("aborted"));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("aborting a running send destroys it", async () => {
+    const { request, calls } = fakeRequest(() => {}); // never answers
+    const controller = new AbortController();
+    const sending = sendPush(makePush().push, { request, signal: controller.signal, timeoutMs: 5000 });
+    expect(calls).toHaveLength(1);
+    controller.abort();
+    expect(await sending).toEqual(failedWith("aborted"));
+    expect(calls[0].destroyed).toBe(true);
+    await sleep(20);
+    expect(calls[0].destroyed).toBe(true); // the timer is gone: no second destroy
   });
 
   test("settles once, with the first outcome, and stops the timer when it has an answer", async () => {
@@ -656,14 +727,14 @@ describe("sendPush", () => {
       req.emit("error", new Error("reset"));
       answer(201);
     });
-    expect(await sendPush(makePush().push, { request: errorThenAnswer.request })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request: errorThenAnswer.request })).toEqual(failedWith("network"));
 
     // a late answer after the timeout cannot change the result either
     let lateAnswer: (status: number) => unknown = () => {};
     const slow = fakeRequest((_req, answer) => {
       lateAnswer = answer;
     });
-    expect(await sendPush(makePush().push, { request: slow.request, timeoutMs: 30 })).toEqual(FAILED);
+    expect(await sendPush(makePush().push, { request: slow.request, timeoutMs: 30 })).toEqual(failedWith("timeout"));
     lateAnswer(201);
     expect(slow.calls[0].destroyed).toBe(true);
   });

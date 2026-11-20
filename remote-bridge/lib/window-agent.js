@@ -1162,13 +1162,14 @@ class WindowAgent extends EventEmitter {
 
   /**
    * The title an attention event names a session by, as project() shows it: the panel's live title, else the
-   * listed custom title or summary (from the last session list read), else "New session". One line, at most
-   * AGENT_LIMITS.title characters (and the ellipsis).
+   * listed custom title or summary, else "Untitled" for a listed session without either, else "New session"
+   * for one that is not listed yet. One line, at most AGENT_LIMITS.title characters (and the ellipsis).
    * @param {string} sessionId
    */
   _titleOf(sessionId) {
     const listed = this._listed?.find((entry) => entry.id === sessionId);
-    return this._liveTitle(sessionId, this._context()) ?? listed?.customTitle ?? listed?.summary ?? 'New session';
+    const listedTitle = listed ? listed.customTitle ?? listed.summary ?? 'Untitled' : 'New session';
+    return this._liveTitle(sessionId, this._context()) ?? listedTitle;
   }
 
   /** First 12 hex of sha1(appName + "\n" + folders joined by "\n"): stable across reloads. */
@@ -1316,6 +1317,27 @@ class WindowAgent extends EventEmitter {
     if (enabled === this._enabled) return;
     this._enabled = enabled;
     if (!enabled) this._live.clear();
+    else this.replayAttention();
+  }
+
+  /**
+   * Reports the prompts that are open right now as `open` events, one per session, so a hub that has just
+   * taken over (or remote access that was just turned on) knows what is already waiting. Old prompts are
+   * counted, not announced: no `waiting` is emitted. Nothing while remote access is off.
+   */
+  replayAttention() {
+    if (!this._enabled) return;
+    /** @type {Map<string, string[]>} session id → its live request ids */
+    const open = new Map();
+    for (const entry of this._pending.values()) {
+      if (!this._isLive(entry)) continue;
+      const sessionId = this._entrySession(entry);
+      if (!sessionId) continue;
+      const ids = open.get(sessionId);
+      if (ids) ids.push(entry.pending.requestId);
+      else open.set(sessionId, [entry.pending.requestId]);
+    }
+    for (const [session, requestIds] of open) this._emitAttention({ kind: 'open', session, requestIds });
   }
 
   /**

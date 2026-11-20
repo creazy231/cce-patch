@@ -60,8 +60,11 @@ const DNS_NAME = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
  * }} Push
  *   vapid is the application server key pair: the raw public key as base64url and the private key
  *   as a JWK. subject is the `https:` or `mailto:` contact. ttl is in seconds.
- * @typedef {{ ok: boolean, status: number, gone: boolean }} PushResult
- *   status is 0 when no answer came. gone means the subscription is dead (404 or 410).
+ * @typedef {{ ok: boolean, status: number, gone: boolean, reason?: string }} PushResult
+ *   status is 0 when no answer came, and then `reason` says why: 'refused' (the allowlist refused the
+ *   endpoint), 'too_large' (the body is over 4096 bytes), 'invalid' (bad inputs, a ttl that is not a
+ *   whole number of seconds, keys that cannot encrypt or a JWK that cannot sign), 'network' (a request
+ *   error), 'timeout' or 'aborted' (options.signal). gone means the subscription is dead (404 or 410).
  */
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -237,40 +240,47 @@ function vapidAuthorization({ endpoint, publicKey, privateJwk, subject, now = Da
   return `vapid t=${header}.${claims}.${b64url(signature)}, k=${publicKey}`;
 }
 
-/** @returns {PushResult} */
-function failed() {
-  return { ok: false, status: 0, gone: false };
+/** @param {string} [reason] @returns {PushResult} */
+function failed(reason) {
+  return { ok: false, status: 0, gone: false, reason };
 }
 
 /**
  * Sends one push: encrypts the payload for the subscription, signs for the endpoint and POSTs to it.
- * Never rejects. No answer is status 0 with `ok` and `gone` false: an endpoint the allowlist refuses
- * (nothing is requested), a push that is not usable (bad keys, a ttl that is not a whole number of
- * seconds), a body of more than 4096 bytes (also not requested), a network error and a timeout. An
- * answer is its status: `ok` for 2xx, `gone` for 404 and 410. A redirect is an answer, not followed.
- * `timeoutMs` bounds the wait for the answer, and a request still open then is destroyed.
+ * Never rejects. No answer is status 0 with `ok` and `gone` false, and `reason` says what stopped it:
+ * 'refused' for an endpoint the allowlist refuses (nothing is requested), 'invalid' for a push that is
+ * not usable (a missing subject or VAPID keys, bad keys, a ttl that is not a whole number of seconds),
+ * 'too_large' for a body of more than 4096 bytes (also not requested), 'network' for a request error,
+ * 'timeout' when no answer came in `timeoutMs` (a request still open then is destroyed) and 'aborted'
+ * when `options.signal` aborted (an aborted send makes no request, and one aborted while running is
+ * destroyed). An answer is its status: `ok` for 2xx, `gone` for 404 and 410. A redirect is an answer,
+ * not followed.
  * @param {Push} push
  * @param {{
  *   request?: typeof https.request,
  *   timeoutMs?: number,
  *   allowEndpoint?: (url: unknown) => boolean,
+ *   signal?: AbortSignal,
  * }} [options]
  *   request: how the POST is made (tests stub it, or hand in http.request for a local server).
- *   allowEndpoint: replaces isAllowedEndpoint (same reason).
+ *   allowEndpoint: replaces isAllowedEndpoint (same reason). signal: stops the send when it aborts.
  * @returns {Promise<PushResult>}
  */
-function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_MS, allowEndpoint = isAllowedEndpoint } = {}) {
+function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_MS, allowEndpoint = isAllowedEndpoint, signal } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     /** @type {NodeJS.Timeout | undefined} */
     let timer;
     /** @type {import('http').ClientRequest | undefined} */
     let req;
+    /** @type {(() => void) | undefined} */
+    let onAbort;
 
     /** @param {PushResult} result */
     const settle = (result) => {
       if (settled) return;
       settled = true;
+      if (signal && onAbort && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onAbort);
       resolve(result);
     };
     // The timer stays armed after an answer: a response whose body stalls still has to be destroyed.
@@ -279,11 +289,27 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
       timer = undefined;
     };
 
+    // Already aborted: nothing is requested.
+    if (signal && signal.aborted === true) {
+      settle(failed('aborted'));
+      return;
+    }
+    if (signal && typeof signal.addEventListener === 'function') {
+      onAbort = () => {
+        stopTimer();
+        settle(failed('aborted'));
+        req?.destroy();
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     try {
       const { endpoint, keys, vapid, subject, payload, ttl, urgency, topic } = push;
-      if (!allowEndpoint(endpoint) || !Number.isInteger(ttl) || ttl < 0) return settle(failed());
+      if (!allowEndpoint(endpoint)) return settle(failed('refused'));
+      if (typeof subject !== 'string' || subject === '' || !isRecord(vapid) || typeof vapid.publicKey !== 'string' || !isRecord(vapid.privateJwk)) return settle(failed('invalid'));
+      if (!Number.isInteger(ttl) || ttl < 0) return settle(failed('invalid'));
       const body = encrypt(payload, keys);
-      if (body.length > MAX_BODY_BYTES) return settle(failed());
+      if (body.length > MAX_BODY_BYTES) return settle(failed('too_large'));
 
       /** @type {Record<string, string>} */
       const headers = {
@@ -298,7 +324,7 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
 
       // Armed before the request exists, so that an answer which comes at once still stops it.
       timer = setTimeout(() => {
-        settle(failed());
+        settle(failed('timeout'));
         req?.destroy();
       }, timeoutMs);
       timer.unref();
@@ -308,16 +334,17 @@ function sendPush(push, { request = https.request, timeoutMs = DEFAULT_TIMEOUT_M
         res.on('close', stopTimer); // or the connection closed before the body ended
         res.resume(); // the body is of no use, and reading it off lets the connection go
         const status = Number(res.statusCode) || 0;
-        settle({ ok: status >= 200 && status < 300, status, gone: status === 404 || status === 410 });
+        if (status === 0) settle(failed('network')); // an answer without a status is no answer
+        else settle({ ok: status >= 200 && status < 300, status, gone: status === 404 || status === 410 });
       });
       req.on('error', () => {
         stopTimer(); // no response will come
-        settle(failed());
+        settle(failed('network'));
       });
       req.end(body);
     } catch {
       stopTimer();
-      settle(failed());
+      settle(failed('invalid'));
     }
   });
 }

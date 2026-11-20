@@ -520,7 +520,9 @@ same allowlist used for sending, the subscription keys and the VAPID JWK, and th
 subject (`https:` or `mailto:`); prefs are booleans and missing ones default to on.
 Errors are `bad_request`, `bad_endpoint`, `bad_keys` and `save_failed`. `push_test`
 ignores looking, away and the flood cap; its ack carries `push_off`, `push_gone` or
-`push_failed` with the push service's status. `visibility` has no ack: a socket counts
+`push_failed` with the push service's status. A status-0 `push_failed` may also carry `reason`
+(`refused`, `too_large`, `invalid`, `network`, `timeout` or `aborted`), why no answer came.
+`visibility` has no ack: a socket counts
 as visible from its hello until it says otherwise, and it stops counting as looking
 after 40 s without a frame. An old bridge answers the new acked frames with
 `unknown_type` and ignores `visibility`.

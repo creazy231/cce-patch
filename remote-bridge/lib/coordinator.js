@@ -1156,7 +1156,8 @@ class Coordinator extends EventEmitter {
   /**
    * Passes the agent's project, session and attention events to the hub. The project goes at once (the
    * agent emits one only when it changes, and may have sent this one to an earlier hub), then again
-   * once the session list is read.
+   * once the session list is read. Right after the listeners are registered, the prompts that are open
+   * are reported again (`replayAttention`), so a hub that has just taken over learns about them.
    * @param {number} gen
    * @param {Sink} sink
    */
@@ -1209,6 +1210,15 @@ class Coordinator extends EventEmitter {
       onProject(agent.project());
     } catch (error) {
       this._quiet(error);
+    }
+    // A new hub (a takeover, say) learns the prompts that were already open, now that it has the
+    // window's project: they are counted, not announced.
+    if (typeof agent.replayAttention === 'function') {
+      try {
+        agent.replayAttention();
+      } catch (error) {
+        this._quiet(error);
+      }
     }
     Promise.resolve()
       .then(() => agent.refreshProject())

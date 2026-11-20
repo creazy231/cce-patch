@@ -102,6 +102,7 @@ interface Answer {
   ok: boolean;
   status: number;
   gone: boolean;
+  reason?: string;
 }
 
 interface HarnessOptions {
@@ -380,6 +381,20 @@ describe("attention", () => {
     expect(failing.logs).toHaveLength(2);
   });
 
+  test("failed pushes log their reason", async () => {
+    const h = harness({ answer: () => ({ ok: false, status: 0, gone: false, reason: "timeout" }) });
+    withPush(h);
+    attention(h, done("s1"));
+    await settle();
+    expect(h.logs).toEqual(["warn push to web.push.apple.com failed (timeout)"]);
+
+    const status = harness({ answer: () => ({ ok: false, status: 503, gone: false }) });
+    withPush(status);
+    attention(status, done("s1"));
+    await settle();
+    expect(status.logs).toEqual(["warn push to web.push.apple.com failed (status 503)"]);
+  });
+
   test("the idle read is bounded: a timeout counts as away", async () => {
     const h = harness({ idle: () => new Promise<number>(() => {}) });
     withPush(h, { waiting: true, done: true, onlyAway: true, details: true });
@@ -411,6 +426,23 @@ describe("attention", () => {
     await settle();
     expect(inFlight.logs).toEqual([]); // a result after close is ignored, and nothing throws
   });
+
+  test("close aborts sends in flight", async () => {
+    let resolveSend: (answer: Answer) => void = () => {};
+    const h = harness({ answer: () => new Promise<Answer>((resolve) => (resolveSend = resolve)) });
+    withPush(h);
+    attention(h, done("s1"));
+    await settle();
+    expect(h.calls).toHaveLength(1);
+    const { signal } = h.calls[0].options;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+    h.notifier.close();
+    expect(signal.aborted).toBe(true);
+    resolveSend({ ok: false, status: 0, gone: false, reason: "aborted" });
+    await settle();
+    expect(h.logs).toEqual([]);
+  });
 });
 
 describe("test pushes", () => {
@@ -420,7 +452,8 @@ describe("test pushes", () => {
     const result = await h.notifier.test("dev1");
     expect(result).toEqual({ ok: true });
     expect(h.calls).toHaveLength(1);
-    expect(h.calls[0].options).toBe(h.sendOptions);
+    expect(h.calls[0].options).toMatchObject(h.sendOptions);
+    expect(h.calls[0].options.signal).toBeInstanceOf(AbortSignal);
     const payload = JSON.parse(h.calls[0].push.payload);
     expect(payload).toMatchObject({ kind: "test", title: "CCE Remote", tag: "cce-test", url: "/" });
     expect(payload.body).toBe(`Notifications from ${MAC} work.`);
@@ -459,6 +492,12 @@ describe("test pushes", () => {
     const failed = harness({ answer: () => ({ ok: false, status: 500, gone: false }) });
     withPush(failed);
     expect(await failed.notifier.test("dev1")).toEqual({ ok: false, error: "push_failed", status: 500 });
+  });
+
+  test("a test push that could not reach the service says why", async () => {
+    const h = harness({ answer: () => ({ ok: false, status: 0, gone: false, reason: "timeout" }) });
+    withPush(h);
+    expect(await h.notifier.test("dev1")).toEqual({ ok: false, error: "push_failed", status: 0, reason: "timeout" });
   });
 });
 

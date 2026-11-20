@@ -2210,6 +2210,16 @@ describe("push", () => {
     expect(await nextFrame(phone, "error")).toEqual({ t: "error", code: "bad_request", message: expect.any(String) });
   });
 
+  test("a push_test that could not reach the service carries its reason", async () => {
+    const sender = { send: async () => ({ ok: false, status: 0, gone: false, reason: "timeout" }) };
+    const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send(pushFrame(makeSubscriber(), makeVapid(), { id: "p1" }));
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p1", ok: true });
+    phone.send({ t: "push_test", id: "p2" });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "p2", ok: false, error: "push_failed", status: 0, reason: "timeout" });
+  });
+
   test("welcome tells whether this Mac holds a subscription", async () => {
     const sender = fakePushSender();
     const ctx = await startHub({ hub: { notifier: { send: sender.send, idleSeconds: async () => 9999, limits: { graceMs: 0 } } } });

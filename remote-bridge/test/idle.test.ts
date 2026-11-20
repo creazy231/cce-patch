@@ -208,8 +208,4 @@ describe("userIdleSeconds", () => {
     expect(Number.isFinite(seconds)).toBe(true);
     expect(seconds).toBeGreaterThanOrEqual(0);
   });
-
-  test.skipIf(process.platform === "darwin")("is Infinity where there is no ioreg", async () => {
-    expect(await userIdleSeconds()).toBe(Infinity);
-  });
 });

@@ -236,6 +236,7 @@ async function hubAndPeer(options: Record<string, any> = {}) {
   a.coordinator.start();
   await a.coordinator.connect();
   const b = makeCoordinator(env, { folder: "/work/b", tailscale, ...options });
+  options.beforePeer?.(b);
   b.coordinator.start();
   await until("the second window to join", () => b.coordinator.role === "peer");
   return { port, env, a, b, tailscale };
@@ -1204,6 +1205,23 @@ describe("a peer window", () => {
     agent.emit("attention", { kind: "open", session: "s1", requestIds: [] });
     await until("the third attention event", () => link.events.filter(([name]: [string]) => name === "attention").length === 3);
     expect(link.events.filter(([name]: [string]) => name === "attention").map(([, ev]: [string, any]) => ev.kind)).toEqual(["waiting", "done", "open"]);
+  });
+
+  test("a new hub learns the prompts that were already open", async () => {
+    const attention: any[] = [];
+    const createHub = (options: object) => {
+      const hub = new Hub(options);
+      hub.on("attention", (event: any) => attention.push(event));
+      return hub;
+    };
+    await hubAndPeer({
+      createHub,
+      beforePeer: (window: any) => {
+        window.comms.requestPermission("c1", bash);
+      },
+    });
+    const event = await until("the hub to learn the open prompt", () => attention.find((ev) => ev.ev?.kind === "open" && ev.ev?.session === "s1"));
+    expect(event.ev.requestIds).toHaveLength(1);
   });
 
   test("the hub goes away mid-call: the peer's own calls fail fast, and it looks for a hub again", async () => {
