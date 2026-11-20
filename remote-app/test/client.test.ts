@@ -921,6 +921,30 @@ describe("RemoteClient: notifications", () => {
   });
 });
 
+describe("RemoteClient: usage", () => {
+  test("a usage frame reaches the listeners; a malformed one doesn't", () => {
+    const { client } = setup();
+    const frames: unknown[] = [];
+    client.on("usage", (frame) => frames.push(frame));
+    client.connect();
+    handshake();
+    last().receive({ t: "usage", state: "ok", fiveHour: { percent: 42 } });
+    last().receive({ t: "usage", state: 7 });
+    expect(frames).toEqual([{ t: "usage", state: "ok", fiveHour: { percent: 42 } }]);
+  });
+
+  test("usageRefresh sends usage_refresh only while open", () => {
+    const { client } = setup();
+    client.connect();
+    client.usageRefresh();
+    expect(last().sent).toEqual([]);
+    handshake();
+    const before = last().sent.length;
+    client.usageRefresh();
+    expect(last().sent.slice(before)).toEqual([{ t: "usage_refresh" }]);
+  });
+});
+
 describe("RemoteClient: keeping the connection alive", () => {
   test("pings every 25 s while open", () => {
     const { client, timers } = setup();

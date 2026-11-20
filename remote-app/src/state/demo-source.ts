@@ -4,7 +4,7 @@
 // Nothing leaves the page.
 
 import { RemoteError, type ClientEvents, type ClientState } from "../lib/client";
-import { demoProjects, demoSnapshot } from "../lib/demo";
+import { demoProjects, demoSnapshot, demoUsage } from "../lib/demo";
 import type { Ack, Choice, ContentBlock, ImageUpload, Pending, PhoneMessage, Project, SessionState, StreamEvent } from "../lib/protocol";
 import type { PushSetup } from "../lib/push";
 import type { Source } from "./source";
@@ -117,6 +117,7 @@ export class DemoSource implements Source {
     this.later(() => {
       this.setState("open");
       this.emit("projects", this.list);
+      this.emit("usage", demoUsage(Date.now()));
       if (this.sub) this.sendSnapshot(this.sub.session);
     }, 160);
   }
@@ -240,6 +241,11 @@ export class DemoSource implements Source {
 
   pushTest(): Promise<Ack> {
     return this.demoAck();
+  }
+
+  /** The demo's usage numbers again, as if Claude Code had just read them. */
+  usageRefresh(): void {
+    if (this.current === "open") this.later(() => this.emit("usage", demoUsage(Date.now())), 120);
   }
 
   // ---- internals ----

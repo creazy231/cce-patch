@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { demoProjects, demoSnapshot } from "../src/lib/demo";
+import type { UsageFrame } from "../src/lib/protocol";
+import { DemoSource } from "../src/state/demo-source";
 import { buildTranscript, latestTodos, type TranscriptItem } from "../src/lib/transcript";
 
 const sessions = demoProjects.flatMap((project) => project.sessions.map((session) => ({ project, session })));
@@ -99,5 +101,23 @@ describe("demo data (?demo)", () => {
       for (const folder of project.folders) expect(folder.startsWith("~/")).toBe(true);
     }
     expect(json).not.toMatch(/\/Users\/|\/home\/|@|\.ts\.net|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+  });
+});
+
+describe("DemoSource: usage", () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  test("the demo sends usage after connecting and on usageRefresh", async () => {
+    const source = new DemoSource({ speed: 0, liveStream: false });
+    const frames: UsageFrame[] = [];
+    source.on("usage", (frame) => frames.push(frame));
+    source.connect();
+    await tick();
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ t: "usage", state: "ok", fiveHour: { percent: 42 }, week: { percent: 18 } });
+    source.usageRefresh();
+    await tick();
+    expect(frames).toHaveLength(2);
+    source.close();
   });
 });

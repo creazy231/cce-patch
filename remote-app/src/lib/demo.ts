@@ -1,7 +1,7 @@
 // Built-in fixture data for `?demo`: screenshots and UI tests without a Mac or a network.
 // Everything here is fictional (projects "acme-api", "acme-web", "docs-site").
 
-import type { ContentBlock, Pending, PhoneMessage, Project, SessionSummary, SnapshotFrame } from "./protocol";
+import type { ContentBlock, Pending, PhoneMessage, Project, SessionSummary, SnapshotFrame, UsageFrame } from "./protocol";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -456,6 +456,17 @@ export const demoProjects: Project[] = PROJECT_INFO.map((info) => ({
 }));
 
 /** What the Mac sends after `sub` for a demo session; an unknown id gives an empty, idle session. */
+/** The demo's usage meter: a 5-hour limit at 42 % resetting in 2 h 13 min, the week at 18 % resetting in 3 days. */
+export function demoUsage(at: number): UsageFrame {
+  return {
+    t: "usage",
+    state: "ok",
+    fiveHour: { percent: 42, resetsAt: at + 2 * HOUR + 13 * MINUTE },
+    week: { percent: 18, resetsAt: at + 3 * DAY },
+    at,
+  };
+}
+
 export function demoSnapshot(sessionId: string): SnapshotFrame {
   const demo = SESSIONS.find((s) => s.summary.id === sessionId);
   return {

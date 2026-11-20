@@ -23,4 +23,6 @@ export interface Source {
   pushSet(setup: PushSetup): Promise<Ack>;
   pushClear(): Promise<Ack>;
   pushTest(): Promise<Ack>;
+  /** Asks the Mac for fresh usage numbers (answered with a `usage` event); nothing while not connected. */
+  usageRefresh(): void;
 }

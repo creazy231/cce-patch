@@ -147,6 +147,9 @@ class FakeSource implements Source {
   pushTest(...args: unknown[]) {
     return this.deferred("pushTest", args);
   }
+  usageRefresh() {
+    this.calls.push({ method: "usageRefresh", args: [] });
+  }
 
   count(method: string) {
     return this.calls.filter((c) => c.method === method).length;

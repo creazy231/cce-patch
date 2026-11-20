@@ -17,8 +17,10 @@ import type {
   ServerMsg,
   SnapshotFrame,
   StreamFrame,
+  UsageFrame,
   WelcomeFrame,
 } from "./protocol";
+import { parseUsageFrame } from "./usage";
 
 // ---- injectable environment ---------------------------------------------------------------------
 
@@ -91,6 +93,8 @@ export interface ClientEvents {
   msg: MessageFrame;
   stream: StreamFrame;
   pending: PendingFrame;
+  /** Claude Code's usage meter on the Mac: after the welcome, after usageRefresh(), and when it changes. */
+  usage: UsageFrame;
   error: ErrorFrame;
 }
 
@@ -321,6 +325,11 @@ export class RemoteClient {
     return this.request((id) => ({ t: "push_test", id }));
   }
 
+  /** Asks the Mac for fresh usage numbers; it answers with a `usage` frame (an older Mac ignores it). Only while open. */
+  usageRefresh(): void {
+    if (this.currentState === "open") this.sendFrame({ t: "usage_refresh" });
+  }
+
   // ---- connection lifecycle ----
 
   private openSocket(): void {
@@ -498,6 +507,11 @@ export class RemoteClient {
       case "pending":
         if (this.isSubscribed(frame) && Array.isArray(frame.pending)) this.emit("pending", frame);
         break;
+      case "usage": {
+        const usage = parseUsageFrame(frame);
+        if (usage) this.emit("usage", usage);
+        break;
+      }
       case "ack":
         this.onAck(frame);
         break;

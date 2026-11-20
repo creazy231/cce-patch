@@ -139,6 +139,7 @@ export type ClientMsg =
   | { t: "push_clear"; id: string }
   | { t: "push_test"; id: string }
   | { t: "visibility"; visible: boolean }
+  | { t: "usage_refresh" }
   | { t: "ping" };
 
 /** The answer to `send`, `answer`, `interrupt`, `open`, `openClaude` and the push requests. */
@@ -170,6 +171,29 @@ export interface WelcomeFrame {
   mac: { name: string };
   /** This Mac holds a push subscription for this phone. */
   push?: boolean;
+  /** The Mac's clock (epoch ms) when it sent the welcome; an older Mac leaves it out. */
+  now?: number;
+}
+
+/** One limit of Claude Code's usage meter on the Mac. */
+export interface UsageLimit {
+  /** The share used, in percent (42.5); it may pass 100. */
+  percent: number;
+  /** When the limit resets, epoch ms. */
+  resetsAt?: number;
+}
+
+/**
+ * Claude Code's usage meter on the Mac (the 5-hour and weekly limits of the account it is logged in to).
+ * `none`: Claude Code has the meter but no numbers yet; `unsupported`: no window's Claude Code has it.
+ */
+export interface UsageFrame {
+  t: "usage";
+  state: "ok" | "none" | "unsupported";
+  fiveHour?: UsageLimit;
+  week?: UsageLimit;
+  /** When the Mac got these numbers, epoch ms (the Mac's clock). */
+  at?: number;
 }
 
 export interface ProjectsFrame {
@@ -238,6 +262,7 @@ export type ServerMsg =
   | MessageFrame
   | StreamFrame
   | PendingFrame
+  | UsageFrame
   | Ack
   | ErrorFrame
   | PongFrame;
