@@ -698,7 +698,7 @@ async function pushStore(options: FakePushOptions = {}) {
   return push;
 }
 
-const welcome = () => fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" }, push: false });
+const welcome = (push = false) => fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" }, push });
 
 const MAC_A: Mac = { id: "a", name: "Mac A", url: "https://a.example:47821", deviceId: "devA", token: "t1" };
 const MAC_B: Mac = { id: "b", name: "Mac B", url: "https://b.example:47821", deviceId: "devB", token: "t2" };
@@ -766,6 +766,22 @@ describe("notifications", () => {
     expect(store.state.toasts.at(-1)?.text).toBe("Notifications were turned off on this iPhone");
     expect(fake.count("pushClear")).toBe(1);
     expect(push.storage.getItem("cce-remote:push")).toBeNull();
+  });
+
+  test("a Mac that still holds the subscription is cleared when notifications are off", async () => {
+    await linkedPushStore();
+    welcome(true);
+    await flush();
+
+    expect(fake.count("pushClear")).toBe(1);
+  });
+
+  test("a Mac without a subscription is left alone when notifications are off", async () => {
+    await linkedPushStore();
+    welcome(false);
+    await flush();
+
+    expect(fake.count("pushClear")).toBe(0);
   });
 
   test("an old Mac shows unsupported", async () => {

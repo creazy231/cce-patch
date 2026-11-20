@@ -528,10 +528,15 @@ export class Store {
 
   /**
    * A Mac is ready for requests. While notifications are on, the subscription, keys and prefs are sent
-   * again; a subscription or permission that went away turns them off here.
+   * again; a subscription or permission that went away turns them off here. While they are off, a Mac
+   * that still holds the subscription is told to drop it (the demo has none), so another paired Mac
+   * doesn't keep a dead one until a push to it fails.
    */
-  private async onWelcome(_frame: WelcomeFrame): Promise<void> {
-    if (!this.state.push.on) return;
+  private async onWelcome(frame: WelcomeFrame): Promise<void> {
+    if (!this.state.push.on) {
+      if (!this.state.demo && frame.push === true) this.clearPushOnMac();
+      return;
+    }
     let setup: PushSetup | null;
     try {
       setup = await currentSetup(this.state.push.prefs, this.pushEnv);
