@@ -331,8 +331,11 @@
   color: var(--ink-2);
 }
 
-/* The Active list names each row's window first in its second line. */
+/* The Active list names each row's window first in its second line; it keeps up to 40 % of the line before the
+   branch has to give way. */
 .row-window {
+  flex: 0 0 auto;
+  max-width: 40%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
