@@ -598,6 +598,21 @@
   color: var(--ink-2);
 }
 
+/* a choice in a row (the dictation language) */
+.kv-select {
+  min-width: 0;
+  max-width: 62%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  text-align: right;
+  text-align-last: right;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 /* a value that can be long (the Display measurements): it wraps instead of pushing the label away */
 .kv-wrap {
   align-items: flex-start;

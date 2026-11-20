@@ -1252,12 +1252,16 @@
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
+.composer-input {
+  position: relative;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
   min-height: 44px;
   max-height: 148px;
-  padding: 11px 16px;
+  padding: 11px 44px 11px 16px;
   border: 0;
   outline: none;
   resize: none;
@@ -1360,4 +1364,54 @@
 .stop {
   background: var(--bg-3);
   color: var(--ink);
+}
+
+/* dictation: the microphone sits in the field's lower right corner; while it listens it glows */
+.composer .mic {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.composer .mic:active {
+  background: var(--bg-3);
+}
+
+.composer .mic.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+
+.composer-field.listening {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer .mic.on {
+    animation: none;
+  }
 }

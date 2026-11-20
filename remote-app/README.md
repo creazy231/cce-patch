@@ -68,6 +68,10 @@ Notifications are end-to-end encrypted: the Mac encrypts each one for this phone
 
 A notification can wait on Apple's push service until the phone is reachable; waiting notifications expire after an hour, finished-session notifications after 10 minutes, and test notifications after a minute. Nothing is sent while remote access is off, while no VS Code window is open, or while the Mac sleeps.
 
+## Dictation
+
+Tap the microphone in the message field and speak. Your words appear in the field as you talk; tap the microphone again to stop, edit if you like, then send. Nothing is sent until you tap Send. On the iPhone the words come from Apple's dictation, in the phone's language or the one chosen in Settings → Dictation. If iOS doesn't offer dictation to the home-screen app, the microphone opens the keyboard instead, and its own microphone key does the same job.
+
 ## Hosting on Coolify
 
 The app is a static build served by nginx (see `Dockerfile` and `nginx.conf`; the Dockerfile says how to move its pinned base images to newer versions).

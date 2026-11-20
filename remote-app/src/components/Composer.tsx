@@ -1,10 +1,12 @@
 // The message field at the bottom of a session: text (16 px, so iOS doesn't zoom), up to four photos
-// (downscaled on the phone before sending), Send, and Stop while Claude is working.
+// (downscaled on the phone before sending), dictation (the microphone in the field), Send, and Stop while
+// Claude is working.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { Dictation, dictationLang, dictationProblem, loadDictationLang, mergeDictation } from "../lib/dictation";
 import { downscaleImage } from "../lib/images";
 import type { ImageUpload } from "../lib/protocol";
-import { ArrowUp, Close, Photo, Stop } from "./icons";
+import { ArrowUp, Close, Mic, Photo, Stop } from "./icons";
 import { Spinner, useApp } from "./ui";
 
 const MAX_PHOTOS = 4;
@@ -44,6 +46,11 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
   const [photos, setPhotos] = useState<PhotoDraft[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
   const previews = useRef(new Set<string>());
+  const dictation = useMemo(() => new Dictation(), []);
+  const [listening, setListening] = useState(false);
+  /** What was in the field when dictation started: spoken words go after it. */
+  const spokenAfter = useRef("");
+  useEffect(() => () => dictation.abort(), [dictation]);
 
   // Grow with the text up to a few lines, then scroll inside.
   useLayoutEffect(() => {
@@ -74,8 +81,47 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
     previews.current.delete(photo.preview);
   };
 
+  /** iOS may not offer dictation to the app: the keyboard's own microphone does the same. */
+  const useKeyboardMic = (message: string) => {
+    area.current?.focus();
+    store.toast(message, "info");
+  };
+
+  const toggleDictation = () => {
+    if (listening) {
+      dictation.stop();
+      return;
+    }
+    if (!dictation.supported) {
+      useKeyboardMic("Use the microphone on the keyboard to dictate.");
+      return;
+    }
+    spokenAfter.current = text;
+    const started = dictation.start({
+      lang: dictationLang(loadDictationLang(), (globalThis as { navigator?: { language?: string } }).navigator?.language ?? ""),
+      onText: (final, interim) => change(mergeDictation(spokenAfter.current, [final, interim].filter(Boolean).join(" "))),
+      onEnd: (problem) => {
+        setListening(false);
+        const said = dictationProblem(problem);
+        if (!said) return;
+        if (said.keyboard) useKeyboardMic(said.text);
+        else store.toast(said.text, "error");
+      },
+    });
+    if (started) setListening(true);
+    else useKeyboardMic("Dictation isn't available in this app. Use the microphone on the keyboard instead.");
+  };
+
+  /** Typing or sending takes over from dictation: what it would still hear must not overwrite the field. */
+  const endDictation = () => {
+    if (!listening) return;
+    dictation.abort();
+    setListening(false);
+  };
+
   const send = () => {
     if (!sendable) return;
+    endDictation();
     if (!onSend(text.trim(), photos.flatMap((p) => (p.upload ? [p.upload] : [])))) return;
     change("");
     photos.forEach(release);
@@ -126,7 +172,7 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
         <Photo size={23} />
       </label>
 
-      <div class="composer-field">
+      <div class={listening ? "composer-field listening" : "composer-field"}>
         {photos.length > 0 && (
           <div class="photos">
             {photos.map((photo) => (
@@ -144,21 +190,35 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
             ))}
           </div>
         )}
-        <textarea
-          ref={area}
-          rows={1}
-          value={text}
-          placeholder={placeholder}
-          aria-label="Message"
-          autocapitalize="sentences"
-          onInput={(event) => change(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.isComposing && finePointer()) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
+        <div class="composer-input">
+          <textarea
+            ref={area}
+            rows={1}
+            value={text}
+            placeholder={listening ? "Listening…" : placeholder}
+            aria-label="Message"
+            autocapitalize="sentences"
+            onInput={(event) => {
+              endDictation();
+              change(event.currentTarget.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.isComposing && finePointer()) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          />
+          <button
+            type="button"
+            class={listening ? "mic on" : "mic"}
+            onClick={toggleDictation}
+            aria-label={listening ? "Stop dictation" : "Dictate"}
+            aria-pressed={listening}
+          >
+            <Mic size={20} />
+          </button>
+        </div>
       </div>
 
       {running && (
