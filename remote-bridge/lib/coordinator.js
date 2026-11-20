@@ -1212,7 +1212,8 @@ class Coordinator extends EventEmitter {
       this._quiet(error);
     }
     // A new hub (a takeover, say) learns the prompts that were already open, now that it has the
-    // window's project: they are counted, not announced.
+    // window's project: a prompt that was never announced (remote access was off, or no hub listened) is
+    // announced now; prompts already announced are only counted.
     if (typeof agent.replayAttention === 'function') {
       try {
         agent.replayAttention();
