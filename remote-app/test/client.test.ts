@@ -434,6 +434,7 @@ describe("RemoteClient: subscriptions", () => {
     client.subscribe("p1", "s1");
     expect(last().sent).toEqual([
       { t: "hello", v: 1, deviceId: "dev1", token: "tok1" },
+      { t: "visibility", visible: false },
       { t: "sub", project: "p1", session: "s1" },
     ]);
     last().serverClose();
@@ -441,6 +442,7 @@ describe("RemoteClient: subscriptions", () => {
     handshake();
     expect(last().sent).toEqual([
       { t: "hello", v: 1, deviceId: "dev1", token: "tok1" },
+      { t: "visibility", visible: false },
       { t: "sub", project: "p1", session: "s1" },
     ]);
   });
@@ -452,7 +454,7 @@ describe("RemoteClient: subscriptions", () => {
     last().open();
     expect(last().sent.map((f) => f.t)).toEqual(["hello"]);
     last().receive({ t: "welcome", v: 1, mac: { name: "Example Mac" } });
-    expect(last().sent.map((f) => f.t)).toEqual(["hello", "sub"]);
+    expect(last().sent.map((f) => f.t)).toEqual(["hello", "visibility", "sub"]);
   });
 
   test("nothing but hello goes out before the welcome, even on an open socket", () => {
@@ -462,7 +464,7 @@ describe("RemoteClient: subscriptions", () => {
     client.subscribe("p1", "s1");
     expect(last().sent.map((f) => f.t)).toEqual(["hello"]);
     last().receive({ t: "welcome", v: 1, mac: { name: "Example Mac" } });
-    expect(last().sent.map((f) => f.t)).toEqual(["hello", "sub"]);
+    expect(last().sent.map((f) => f.t)).toEqual(["hello", "visibility", "sub"]);
   });
 
   test("subscribing to the same session twice sends one sub", () => {
@@ -481,6 +483,7 @@ describe("RemoteClient: subscriptions", () => {
     client.subscribe("p1", "s1");
     client.subscribe("p1", "s2");
     expect(last().sent.slice(1)).toEqual([
+      { t: "visibility", visible: false },
       { t: "sub", project: "p1", session: "s1" },
       { t: "unsub", project: "p1", session: "s1" },
       { t: "sub", project: "p1", session: "s2" },
@@ -499,7 +502,7 @@ describe("RemoteClient: subscriptions", () => {
     last().serverClose();
     timers.advance(500);
     handshake();
-    expect(last().sent.map((f) => f.t)).toEqual(["hello"]);
+    expect(last().sent.map((f) => f.t)).toEqual(["hello", "visibility"]);
   });
 
   test("snapshot, msg, stream and pending frames reach their listeners; off() stops delivery", () => {
@@ -854,6 +857,67 @@ describe("RemoteClient: requests", () => {
     frames.forEach((f) => last().receive({ t: "ack", id: f.id, ok: true }));
     const results = await Promise.all(calls.map(([p]) => p));
     expect(results.every((r) => (r as { ok: boolean }).ok)).toBe(true);
+  });
+});
+
+describe("RemoteClient: notifications", () => {
+  test("sends visibility after welcome and on visibility changes", () => {
+    const doc = new FakeTarget();
+    const { client } = setup({ env: { document: doc, window: new FakeTarget() } });
+    client.connect();
+    last().open();
+    last().receive({ t: "welcome", v: 1, mac: { name: "Example Mac" } });
+    expect(last().sent.at(-1)).toEqual({ t: "visibility", visible: true });
+
+    doc.visibilityState = "hidden";
+    doc.dispatch("visibilitychange");
+    expect(last().sent.at(-1)).toEqual({ t: "visibility", visible: false });
+
+    doc.visibilityState = "visible";
+    doc.dispatch("visibilitychange");
+    expect(last().sent.slice(-2)).toEqual([
+      { t: "visibility", visible: true },
+      { t: "ping" }, // the existing wake-up check stays
+    ]);
+  });
+
+  test("push requests are acked", async () => {
+    const { client } = setup();
+    client.connect();
+    handshake();
+    const setupValue = {
+      subscription: { endpoint: "https://push.example/abc", keys: { p256dh: "BAbc-_", auth: "Zm9v-_" } },
+      vapid: { publicKey: "BAbc-_", privateJwk: { kty: "EC", crv: "P-256", x: "x", y: "y", d: "d" } },
+      subject: "https://app.example",
+      prefs: { waiting: true, done: true, onlyAway: true, details: true },
+    };
+    const requests = [client.pushSet(setupValue), client.pushClear(), client.pushTest()];
+    const frames = last().sent.slice(-3);
+    expect(frames[0]).toMatchObject({
+      t: "push_set",
+      subscription: setupValue.subscription,
+      vapid: setupValue.vapid,
+      subject: setupValue.subject,
+      prefs: setupValue.prefs,
+    });
+    expect(frames[1]).toMatchObject({ t: "push_clear" });
+    expect(frames[2]).toMatchObject({ t: "push_test" });
+    for (const frame of frames) expect(typeof frame.id).toBe("string");
+
+    frames.forEach((frame, index) => last().receive({ t: "ack", id: frame.id, ok: true, status: 201 + index }));
+    const results = await Promise.all(requests);
+    expect(results.map((result) => result.status)).toEqual([201, 202, 203]);
+  });
+
+  test("emits welcome", () => {
+    const { client } = setup();
+    const welcomes: unknown[] = [];
+    client.on("welcome", (frame) => welcomes.push(frame));
+    client.connect();
+    last().open();
+    const frame = { t: "welcome", v: 1, mac: { name: "Example Mac" }, push: true };
+    last().receive(frame);
+    expect(welcomes).toEqual([frame]);
   });
 });
 

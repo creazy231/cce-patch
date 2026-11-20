@@ -39,6 +39,35 @@ After pairing the phone reconnects by itself. You can pair several Macs and swit
 
 If the app can't reach the Mac, check that Tailscale is on on the phone and that the Connection tab says it's connected.
 
+## Notifications
+
+CCE Remote can notify your iPhone when Claude needs you — a question, a permission prompt, a plan or a dialog — and when a session finishes. Tapping a notification opens that session in the app.
+
+### What you need
+
+- iOS 16.4 or later, and CCE Remote **added to your Home Screen** (Share → Add to Home Screen) and opened from there. A Safari tab can't show these notifications.
+- Remote access turned on in the Mac's **Connection** tab, a VS Code window open, and the Mac awake. The Mac sends the notifications itself.
+- The phone doesn't need Tailscale on to receive a notification; it needs it to open the session.
+
+### Turn them on
+
+1. In CCE Remote, open **Settings**.
+2. Under **Notifications**, tap **Turn on notifications** and allow notifications when iOS asks.
+3. Choose what you get:
+   - **When Claude needs you** — a question, a permission prompt, a plan or a dialog.
+   - **When a session finishes** — a turn that ended, including one that stopped with an error.
+   - **Only when I'm away from the Mac** — no notification while you're using the Mac (no keyboard or mouse input for 2 minutes).
+   - **Show details** — the project, session and question in the notification. With it off, notifications only say that a session needs you or has finished.
+4. Tap **Send a test notification**. It should arrive in a moment. If it doesn't, check that remote access is on in the Mac's Connection tab.
+
+The status line shows whether the connected Mac is set up for this phone. Other paired Macs are set up the next time the app connects to them. **Turn off notifications** removes the subscription from this phone and from the Mac.
+
+### Privacy
+
+Notifications are end-to-end encrypted: the Mac encrypts each one for this phone, and Apple's push service only sees ciphertext. The app's server is not involved at all. The phone makes the notification keys and gives its paired Macs the subscription and keys over the authenticated Tailscale connection.
+
+A notification can wait on Apple's push service until the phone is reachable; waiting notifications expire after an hour, finished-session notifications after 10 minutes, and test notifications after a minute. Nothing is sent while remote access is off, while no VS Code window is open, or while the Mac sleeps.
+
 ## Hosting on Coolify
 
 The app is a static build served by nginx (see `Dockerfile` and `nginx.conf`; the Dockerfile says how to move its pinned base images to newer versions).

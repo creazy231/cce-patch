@@ -1,13 +1,19 @@
-// Settings: the paired Macs (rename, remove), the app's version and its README.
+// Settings: the paired Macs (rename, remove), notifications, the app's version and its README.
 
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { Mac } from "../lib/macs";
+import { ensureVapidKeys } from "../lib/push";
 import { hostOf } from "../state/format";
+import type { PushState } from "../state/store";
 import { Book, ChevronRight, Laptop, Plus } from "./icons";
 import { NavBar, useApp } from "./ui";
 
 export function Settings() {
   const { state, store } = useApp();
+  // Made while Settings opens, so the tap on "Turn on notifications" can ask for permission first.
+  useEffect(() => {
+    if (!state.demo && state.push.support === "ok") void ensureVapidKeys();
+  }, []);
   return (
     <div class="screen settings">
       <NavBar onBack={() => store.back()} title="Settings" />
@@ -30,6 +36,9 @@ export function Settings() {
           <Plus size={18} stroke={2.2} />
           Pair another Mac
         </button>
+
+        <h2 class="group-title">Notifications</h2>
+        <Notifications push={state.push} demo={state.demo} macName={store.macName} />
 
         <h2 class="group-title">About</h2>
         <div class="group">
@@ -62,6 +71,94 @@ export function Settings() {
         )}
       </div>
     </div>
+  );
+}
+
+/** What the connected Mac says about this phone's subscription. */
+function pushStatus(push: PushState, macName: string): string {
+  if (push.mac === "on") return `${macName}: on`;
+  if (push.mac === "unsupported") return `${macName}: this Mac's patch is too old for notifications`;
+  if (push.mac === "off" && push.error) return `${macName}: can't be reached right now`;
+  return `${macName}: not set up yet`;
+}
+
+function Notifications({ push, demo, macName }: { push: PushState; demo: boolean; macName: string }) {
+  const { store } = useApp();
+  const guidance = demo
+    ? "Notifications aren't available in the demo."
+    : push.support === "not-installed"
+      ? "Add CCE Remote to your Home Screen (Share → Add to Home Screen) and open it from there to get notifications."
+      : push.support === "unsupported"
+        ? "This browser can't show notifications from CCE Remote. On iPhone they need iOS 16.4 or later."
+        : push.support === "denied"
+          ? "Notifications are blocked for CCE Remote. Allow them in the Settings app → Notifications → CCE Remote."
+          : null;
+
+  if (guidance) {
+    return (
+      <div class="group group-note">
+        <p>{guidance}</p>
+      </div>
+    );
+  }
+
+  if (!push.on) {
+    return (
+      <>
+        <button type="button" class="group-action" disabled={push.busy} onClick={() => void store.enablePush()}>
+          Turn on notifications
+        </button>
+        <p class="fine settings-fine">Get a notification when Claude needs you or a session finishes.</p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div class="group">
+        <SwitchRow label="When Claude needs you" checked={push.prefs.waiting} onChange={(value) => void store.setPushPref("waiting", value)} />
+        <SwitchRow label="When a session finishes" checked={push.prefs.done} onChange={(value) => void store.setPushPref("done", value)} />
+        <SwitchRow
+          label="Only when I'm away from the Mac"
+          sub="After 2 minutes without keyboard or mouse use on the Mac"
+          checked={push.prefs.onlyAway}
+          onChange={(value) => void store.setPushPref("onlyAway", value)}
+        />
+        <SwitchRow
+          label="Show details"
+          sub="Project, session and question in the notification"
+          checked={push.prefs.details}
+          onChange={(value) => void store.setPushPref("details", value)}
+        />
+      </div>
+      <div class="group">
+        <div class="kv">
+          <span>Status</span>
+          <span class="kv-value">{pushStatus(push, macName)}</span>
+        </div>
+      </div>
+      <p class="fine settings-fine">Other paired Macs are set up the next time the app connects to them.</p>
+      <div class="group">
+        <button type="button" class="kv link" onClick={() => void store.testPush()}>
+          <span class="kv-label">Send a test notification</span>
+        </button>
+        <button type="button" class="kv link" onClick={() => void store.disablePush()}>
+          <span class="kv-label">Turn off notifications</span>
+        </button>
+      </div>
+    </>
+  );
+}
+
+function SwitchRow({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label class="switch-row">
+      <span class="switch-text">
+        <span class="switch-label">{label}</span>
+        {sub && <span class="switch-sub">{sub}</span>}
+      </span>
+      <input type="checkbox" role="switch" class="switch-input" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} />
+    </label>
   );
 }
 

@@ -1,5 +1,6 @@
 import { render } from "preact";
 import { App } from "./app";
+import { parseOpenLink } from "./lib/push";
 import { Store } from "./state/store";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -23,8 +24,17 @@ store.start();
 render(<App store={store} />, document.getElementById("app")!);
 
 // The service worker keeps the app shell available offline; development runs without it.
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+if ("serviceWorker" in navigator) {
+  // A tap on a notification: the worker posts the session's link, the app opens it.
+  navigator.serviceWorker.addEventListener("message", (event: MessageEvent) => {
+    const data = event.data as { type?: unknown; url?: unknown } | null;
+    if (data?.type !== "cce-open" || typeof data.url !== "string") return;
+    const link = parseOpenLink(new URL(data.url, location.origin).search);
+    if (link) store.openFromLink(link);
   });
+  if (import.meta.env.PROD) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    });
+  }
 }

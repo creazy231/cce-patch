@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { RemoteError, type ClientEvents, type ClientState } from "../src/lib/client";
+import { saveMacs, selectMac, type Mac } from "../src/lib/macs";
 import type { Ack, ImageUpload, Pending, PhoneMessage, Project } from "../src/lib/protocol";
+import { ensureVapidKeys, type PushEnv, type PushPrefs, type PushSetup } from "../src/lib/push";
 import { buildTranscript } from "../src/lib/transcript";
 import type { Source } from "../src/state/source";
 import { Store } from "../src/state/store";
@@ -9,7 +11,20 @@ import { Store } from "../src/state/store";
 
 type Listener = (event: { state: unknown }) => void;
 const saved: Record<string, unknown> = {};
-const GLOBALS = ["window", "history", "location", "document"] as const;
+const GLOBALS = ["window", "history", "location", "document", "localStorage"] as const;
+
+class MemoryStorage {
+  data = new Map<string, string>();
+  getItem(key: string) {
+    return this.data.get(key) ?? null;
+  }
+  setItem(key: string, value: string) {
+    this.data.set(key, value);
+  }
+  removeItem(key: string) {
+    this.data.delete(key);
+  }
+}
 
 function installBrowser() {
   const listeners = new Map<string, Set<Listener>>();
@@ -48,6 +63,7 @@ function installBrowser() {
   };
   g.location = { pathname: "/", search: "", hash: "" };
   g.document = { title: "" };
+  g.localStorage = new MemoryStorage();
 }
 
 function restoreBrowser() {
@@ -110,6 +126,15 @@ class FakeSource implements Source {
   }
   openClaude(...args: unknown[]) {
     return this.deferred("openClaude", args);
+  }
+  pushSet(...args: unknown[]) {
+    return this.deferred("pushSet", args);
+  }
+  pushClear(...args: unknown[]) {
+    return this.deferred("pushClear", args);
+  }
+  pushTest(...args: unknown[]) {
+    return this.deferred("pushTest", args);
   }
 
   count(method: string) {
@@ -546,5 +571,271 @@ describe("stopping a turn", () => {
     fake.last("interrupt").reject!(new RemoteError("not_running"));
     await stopping;
     expect(store.state.toasts.at(-1)?.text).toBe("Couldn't stop: Claude Code isn't running this session right now.");
+  });
+});
+
+// ---- notifications -------------------------------------------------------------------------------
+
+class FakePushCache {
+  data = new Map<string, string>();
+  async match(request: string) {
+    const body = this.data.get(request);
+    return body === undefined ? undefined : new Response(body);
+  }
+  async put(request: string, response: Response) {
+    this.data.set(request, await response.text());
+  }
+}
+
+class FakePushCaches {
+  private readonly caches = new Map<string, FakePushCache>();
+  async open(name: string) {
+    let cache = this.caches.get(name);
+    if (!cache) {
+      cache = new FakePushCache();
+      this.caches.set(name, cache);
+    }
+    return cache;
+  }
+  map(name: string): Record<string, number> {
+    const body = this.caches.get(name)?.data.get("/badge.json");
+    return body ? JSON.parse(body) : {};
+  }
+}
+
+class FakePushSubscription {
+  endpoint = "https://push.example/abc";
+  unsubscribed = false;
+  constructor(private readonly key: Uint8Array | null = null) {}
+  get options() {
+    return { applicationServerKey: this.key };
+  }
+  toJSON() {
+    return { endpoint: this.endpoint, keys: { p256dh: "BAbc-_", auth: "Zm9v-_" } };
+  }
+  async unsubscribe() {
+    this.unsubscribed = true;
+    return true;
+  }
+}
+
+interface FakePushOptions {
+  on?: boolean;
+  permission?: string;
+  subscription?: boolean;
+  prefs?: PushPrefs;
+}
+
+/** Browser push APIs and storage for the store; real crypto, fake service worker and cache storage. */
+function fakePushEnv(options: FakePushOptions = {}) {
+  const storage = new MemoryStorage();
+  if (options.on) storage.setItem("cce-remote:push", "1");
+  if (options.prefs) storage.setItem("cce-remote:push-prefs", JSON.stringify(options.prefs));
+  let subscription: FakePushSubscription | null = options.subscription ? new FakePushSubscription(new Uint8Array(65)) : null;
+  const pushManager = {
+    async getSubscription() {
+      return subscription;
+    },
+    async subscribe(init: { applicationServerKey: Uint8Array }) {
+      subscription = new FakePushSubscription(init.applicationServerKey);
+      return subscription;
+    },
+  };
+  const registration = { pushManager };
+  const caches = new FakePushCaches();
+  const badges: number[] = [];
+  let cleared = 0;
+  const env: PushEnv = {
+    navigator: {
+      serviceWorker: { ready: Promise.resolve(registration) },
+      setAppBadge: async (count: number) => {
+        badges.push(count);
+      },
+      clearAppBadge: async () => {
+        cleared++;
+      },
+    } as PushEnv["navigator"],
+    Notification: {
+      permission: options.permission ?? "granted",
+      requestPermission: async () => options.permission ?? "granted",
+    },
+    crypto: globalThis.crypto as PushEnv["crypto"],
+    storage,
+    origin: "https://app.example",
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+    maxTouchPoints: 5,
+    standalone: () => true,
+    caches: caches as unknown as PushEnv["caches"],
+  };
+  return { env, storage, caches, badges, cleared: () => cleared, subscription: () => subscription };
+}
+
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** A fresh store with notifications on the given fake phone, its keys already made. */
+async function pushStore(options: FakePushOptions = {}) {
+  const push = fakePushEnv(options);
+  await ensureVapidKeys(push.env);
+  store.stop();
+  store = new Store({ demo: true, createSource: () => fake, pushEnv: push.env });
+  store.start();
+  return push;
+}
+
+const welcome = () => fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" }, push: false });
+
+const MAC_A: Mac = { id: "a", name: "Mac A", url: "https://a.example:47821", deviceId: "devA", token: "t1" };
+const MAC_B: Mac = { id: "b", name: "Mac B", url: "https://b.example:47821", deviceId: "devB", token: "t2" };
+
+function linkedStore() {
+  saveMacs([MAC_A, MAC_B], localStorage);
+  selectMac(MAC_A.id, localStorage);
+  store.stop();
+  history.replaceState(null, "", "/");
+  store = new Store({ demo: false, createSource: () => fake, pushEnv: fakePushEnv().env });
+  store.start();
+}
+
+describe("notifications", () => {
+  test("while on, every welcome sends push_set", async () => {
+    await pushStore({ on: true, subscription: true });
+    welcome();
+    await flush();
+
+    const call = fake.last("pushSet");
+    const setup = call.args[0] as PushSetup;
+    expect(setup.subscription).toEqual({ endpoint: "https://push.example/abc", keys: { p256dh: "BAbc-_", auth: "Zm9v-_" } });
+    expect(setup.vapid.publicKey).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(setup.subject).toBe("https://app.example");
+    expect(setup.prefs).toEqual({ waiting: true, done: true, onlyAway: true, details: true });
+
+    call.resolve!(ack());
+    await flush();
+    expect(store.state.push.mac).toBe("on");
+  });
+
+  test("a vanished subscription turns notifications off", async () => {
+    const push = await pushStore({ on: true, subscription: false });
+    welcome();
+    await flush();
+
+    expect(store.state.push.on).toBe(false);
+    expect(store.state.toasts.at(-1)?.text).toBe("Notifications were turned off on this iPhone");
+    expect(fake.count("pushClear")).toBe(1);
+    expect(push.storage.getItem("cce-remote:push")).toBeNull();
+  });
+
+  test("an old Mac shows unsupported", async () => {
+    await pushStore({ on: true, subscription: true });
+    welcome();
+    await flush();
+    fake.last("pushSet").reject!(new RemoteError("unknown_type"));
+    await flush();
+    expect(store.state.push.mac).toBe("unsupported");
+  });
+
+  test("turning on subscribes and sends push_set", async () => {
+    const push = await pushStore({ on: false, subscription: false });
+    const enabling = store.enablePush();
+    await flush();
+
+    const setup = fake.last("pushSet").args[0] as PushSetup;
+    expect(setup.subscription.endpoint).toBe("https://push.example/abc");
+    expect(setup.subject).toBe("https://app.example");
+    expect(store.state.push.on).toBe(true);
+    expect(push.storage.getItem("cce-remote:push")).toBe("1");
+
+    fake.last("pushSet").resolve!(ack());
+    await enabling;
+    expect(store.state.push.mac).toBe("on");
+  });
+
+  test("turning off unsubscribes and sends push_clear", async () => {
+    const push = await pushStore({ on: true, subscription: true });
+    const subscription = push.subscription()!;
+    await store.disablePush();
+
+    expect(subscription.unsubscribed).toBe(true);
+    expect(store.state.push.on).toBe(false);
+    expect(push.storage.getItem("cce-remote:push")).toBeNull();
+    expect(fake.count("pushClear")).toBe(1);
+  });
+
+  test("a pref change is saved and sent", async () => {
+    const push = await pushStore({ on: true, subscription: true });
+    const saving = store.setPushPref("done", false);
+    await flush();
+
+    expect(JSON.parse(push.storage.getItem("cce-remote:push-prefs")!).done).toBe(false);
+    expect((fake.last("pushSet").args[0] as PushSetup).prefs.done).toBe(false);
+    fake.last("pushSet").resolve!(ack());
+    await saving;
+  });
+
+  test("a test push says how it went", async () => {
+    await pushStore({ on: true, subscription: true });
+
+    const sending = store.testPush();
+    await flush();
+    fake.last("pushTest").resolve!(ack({ status: 201 }));
+    await sending;
+    expect(store.state.toasts.at(-1)).toMatchObject({ text: "Test notification sent.", tone: "success" });
+
+    const failing = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_failed", "push_failed", 500));
+    await failing;
+    expect(store.state.toasts.at(-1)?.text).toContain("500");
+
+    const gone = store.testPush();
+    await flush();
+    fake.last("pushTest").reject!(new RemoteError("push_gone"));
+    await gone;
+    expect(store.state.push.on).toBe(false);
+    expect(store.state.toasts.at(-1)?.text).toBe("Notifications were turned off on this iPhone");
+  });
+
+  test("a link opens the session on its Mac", () => {
+    linkedStore();
+    expect(store.state.macId).toBe("a");
+    store.openFromLink({ mac: "devB", project: "p2", session: "s2" });
+    expect(store.state.macId).toBe("b");
+    expect(store.state.route).toEqual({ name: "session", project: "p2", session: "s2" });
+    expect(fake.last("subscribe").args).toEqual(["p2", "s2"]);
+  });
+
+  test("a link for an unknown Mac is ignored", () => {
+    linkedStore();
+    const before = fake.count("subscribe");
+    store.openFromLink({ mac: "nope", project: "p2", session: "s2" });
+    expect(store.state.route).toEqual({ name: "home" });
+    expect(store.state.macId).toBe("a");
+    expect(fake.count("subscribe")).toBe(before);
+  });
+
+  test("projects update the badge", async () => {
+    const push = fakePushEnv();
+    store.stop();
+    store = new Store({ demo: true, createSource: () => fake, pushEnv: push.env });
+    store.start();
+    fake.emit("projects", [
+      {
+        id: PROJECT,
+        name: "acme-api",
+        folders: [],
+        editor: "Visual Studio Code",
+        claudeOpen: true,
+        sessions: [
+          { id: "s1", title: "one", lastModified: 1, state: "waiting", live: true, pendingCount: 1 },
+          { id: "s2", title: "two", lastModified: 2, state: "waiting", live: true, pendingCount: 1 },
+          { id: "s3", title: "three", lastModified: 3, state: "running", live: true, pendingCount: 0 },
+        ],
+      },
+    ]);
+    await flush();
+
+    expect(push.badges).toEqual([2]);
+    expect(push.caches.map("cce-badge")).toEqual({ "demo-mac": 2 });
+    expect(document.title).toBe("(2) CCE Remote");
   });
 });

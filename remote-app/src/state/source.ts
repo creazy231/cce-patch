@@ -1,5 +1,6 @@
 import type { ClientEvents, ClientState } from "../lib/client";
 import type { Ack, Choice, ImageUpload, Project } from "../lib/protocol";
+import type { PushSetup } from "../lib/push";
 
 /**
  * What the screens need from a Mac. `RemoteClient` (a paired Mac) has exactly this shape, and so does
@@ -19,4 +20,7 @@ export interface Source {
   interrupt(project: string, session: string): Promise<Ack>;
   open(project: string, session: string): Promise<Ack>;
   openClaude(project: string): Promise<Ack>;
+  pushSet(setup: PushSetup): Promise<Ack>;
+  pushClear(): Promise<Ack>;
+  pushTest(): Promise<Ack>;
 }

@@ -2,6 +2,8 @@
 // The bridge lives in remote-bridge/ and is built separately; these types mirror its contract
 // (docs/superpowers/specs/2026-11-19-phone-remote-design.md, "Bridge: phone protocol").
 
+import type { PushPrefs, PushSetup } from "./push";
+
 export const PROTOCOL_VERSION = 1;
 
 // ---- projects and sessions ----------------------------------------------------------------------
@@ -133,14 +135,20 @@ export type ClientMsg =
   | { t: "interrupt"; id: string; project: string; session: string }
   | { t: "open"; id: string; project: string; session: string }
   | { t: "openClaude"; id: string; project: string }
+  | { t: "push_set"; id: string; subscription: PushSetup["subscription"]; vapid: PushSetup["vapid"]; subject: string; prefs: PushPrefs }
+  | { t: "push_clear"; id: string }
+  | { t: "push_test"; id: string }
+  | { t: "visibility"; visible: boolean }
   | { t: "ping" };
 
-/** The answer to `send`, `answer`, `interrupt`, `open` and `openClaude`. */
+/** The answer to `send`, `answer`, `interrupt`, `open`, `openClaude` and the push requests. */
 export interface Ack {
   t: "ack";
   id: string;
   ok: boolean;
   error?: string;
+  /** push_test: the push service's HTTP status, when the Mac got one. */
+  status?: number;
   /** send: the session the message went to (the new one for a new session). */
   session?: string;
   /** send: the uuid of the user message the bridge injected; the CLI replays it with `isReplay`. */
@@ -158,6 +166,8 @@ export interface WelcomeFrame {
   t: "welcome";
   v: number;
   mac: { name: string };
+  /** This Mac holds a push subscription for this phone. */
+  push?: boolean;
 }
 
 export interface ProjectsFrame {

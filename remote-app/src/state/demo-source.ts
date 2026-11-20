@@ -6,6 +6,7 @@
 import { RemoteError, type ClientEvents, type ClientState } from "../lib/client";
 import { demoProjects, demoSnapshot } from "../lib/demo";
 import type { Ack, Choice, ContentBlock, ImageUpload, Pending, PhoneMessage, Project, SessionState, StreamEvent } from "../lib/protocol";
+import type { PushSetup } from "../lib/push";
 import type { Source } from "./source";
 
 export const DEMO_MAC_ID = "demo-mac";
@@ -228,7 +229,24 @@ export class DemoSource implements Source {
     return ack;
   }
 
+  // The demo has no Mac to notify anyone: every push request answers "demo".
+  pushSet(_setup: PushSetup): Promise<Ack> {
+    return this.demoAck();
+  }
+
+  pushClear(): Promise<Ack> {
+    return this.demoAck();
+  }
+
+  pushTest(): Promise<Ack> {
+    return this.demoAck();
+  }
+
   // ---- internals ----
+
+  private demoAck(): Promise<Ack> {
+    return Promise.resolve({ t: "ack", id: `demo-${++this.seq}`, ok: false, error: "demo" });
+  }
 
   private simpleAck(): Promise<Ack> {
     if (this.current !== "open") return Promise.reject(new RemoteError("not_connected"));

@@ -80,3 +80,109 @@ async function cacheFirst(request) {
   if (response.status === 200 && response.type === "basic") await cache.put(request, response.clone());
   return response;
 }
+
+// ---- notifications -------------------------------------------------------------------------------
+// Pushes arrive end-to-end encrypted and are decrypted by the browser; this worker only shows them.
+// The badge counts live in their own cache (cce-badge), which activate keeps.
+
+const BADGE_CACHE = "cce-badge";
+const BADGE_PATH = "/badge.json";
+const NOTIFICATION_ICON = "/icons/icon-192.png";
+const FALLBACK = { title: "Claude Code", body: "Open CCE Remote", tag: "cce" };
+
+/** A string cut to a sane length; anything else is "". */
+function cut(value, max) {
+  return typeof value === "string" ? [...value].slice(0, max).join("") : "";
+}
+
+/** Keeps the waiting count per Mac and returns their sum, or null when the cache is unavailable. */
+async function updateBadge(mac, count) {
+  try {
+    const cache = await caches.open(BADGE_CACHE);
+    const hit = await cache.match(BADGE_PATH);
+    let stored = {};
+    if (hit) {
+      try {
+        const value = await hit.json();
+        if (value && typeof value === "object" && !Array.isArray(value)) stored = value;
+      } catch {
+        stored = {};
+      }
+    }
+    const map = {};
+    for (const [key, value] of Object.entries(stored)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) map[key] = value;
+    }
+    if (count > 0) map[mac] = count;
+    else delete map[mac];
+    await cache.put(BADGE_PATH, new Response(JSON.stringify(map), { headers: { "Content-Type": "application/json" } }));
+    let sum = 0;
+    for (const value of Object.values(map)) sum += value;
+    return sum;
+  } catch {
+    return null;
+  }
+}
+
+async function showPush(event) {
+  let payload = null;
+  try {
+    payload = event.data ? event.data.json() : null;
+  } catch {
+    payload = null;
+  }
+  if (!payload || typeof payload !== "object") {
+    await self.registration.showNotification(FALLBACK.title, { body: FALLBACK.body, tag: FALLBACK.tag });
+    return;
+  }
+  const title = cut(payload.title, 120) || FALLBACK.title;
+  const body = cut(payload.body, 300) || FALLBACK.body;
+  const tag = cut(payload.tag, 120) || FALLBACK.tag;
+  const url = cut(payload.url, 2000) || "/";
+  await self.registration.showNotification(title, {
+    body,
+    tag,
+    data: { url },
+    icon: NOTIFICATION_ICON,
+    badge: NOTIFICATION_ICON,
+    renotify: payload.kind === "waiting",
+  });
+  if (typeof payload.mac === "string" && Number.isInteger(payload.badge) && payload.badge >= 0) {
+    const sum = await updateBadge(payload.mac, payload.badge);
+    if (sum !== null) {
+      try {
+        await self.navigator.setAppBadge(sum);
+      } catch {
+        // Not supported here.
+      }
+    }
+  }
+}
+
+self.addEventListener("push", (event) => {
+  event.waitUntil(showPush(event));
+});
+
+async function openFromNotification(notification) {
+  const data = notification.data && typeof notification.data === "object" ? notification.data : {};
+  let target = "/";
+  try {
+    const url = new URL(typeof data.url === "string" ? data.url : "/", self.location.origin);
+    if (url.origin === self.location.origin) target = url.pathname + url.search + url.hash;
+  } catch {
+    target = "/";
+  }
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const first = windows[0];
+  if (first) {
+    await first.focus();
+    first.postMessage({ type: "cce-open", url: target });
+  } else {
+    await self.clients.openWindow(target);
+  }
+}
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(openFromNotification(event.notification));
+});

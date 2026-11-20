@@ -4,6 +4,7 @@
 
 import type { Mac } from "./macs";
 import { PROTOCOL_VERSION } from "./protocol";
+import type { PushSetup } from "./push";
 import type {
   Ack,
   Choice,
@@ -16,6 +17,7 @@ import type {
   ServerMsg,
   SnapshotFrame,
   StreamFrame,
+  WelcomeFrame,
 } from "./protocol";
 
 // ---- injectable environment ---------------------------------------------------------------------
@@ -65,10 +67,13 @@ export interface WakeEnv {
  */
 export class RemoteError extends Error {
   readonly code: string;
-  constructor(code: string, message = code) {
+  /** push_test: the push service's HTTP status, when the Mac got one. */
+  readonly status?: number;
+  constructor(code: string, message = code, status?: number) {
     super(message);
     this.name = "RemoteError";
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -76,6 +81,7 @@ export type ClientState = "connecting" | "open" | "offline" | "unauthorized";
 
 export interface ClientEvents {
   state: ClientState;
+  welcome: WelcomeFrame;
   projects: Project[];
   // snapshot, msg, stream and pending: only for the session subscribed at that moment.
   snapshot: SnapshotFrame;
@@ -290,6 +296,28 @@ export class RemoteClient {
     return this.request((id) => ({ t: "openClaude", id, project }));
   }
 
+  /** Gives the Mac this phone's push subscription, VAPID keys, app origin and notification prefs. */
+  pushSet(setup: PushSetup): Promise<Ack> {
+    return this.request((id) => ({
+      t: "push_set",
+      id,
+      subscription: setup.subscription,
+      vapid: setup.vapid,
+      subject: setup.subject,
+      prefs: setup.prefs,
+    }));
+  }
+
+  /** Tells the Mac to forget this phone's push subscription. */
+  pushClear(): Promise<Ack> {
+    return this.request((id) => ({ t: "push_clear", id }));
+  }
+
+  /** Asks the Mac to send a test notification now. */
+  pushTest(): Promise<Ack> {
+    return this.request((id) => ({ t: "push_test", id }));
+  }
+
   // ---- connection lifecycle ----
 
   private openSocket(): void {
@@ -376,6 +404,7 @@ export class RemoteClient {
     const doc = this.env ? this.env.document : (globalThis as { document?: WakeEnv["document"] }).document;
     const win = this.env ? this.env.window : (globalThis as { window?: WakeEnv["window"] }).window;
     const onVisibility = () => {
+      if (this.currentState === "open") this.sendVisibility();
       if (doc?.visibilityState === "visible") this.wake();
     };
     const onOnline = () => this.wake();
@@ -385,6 +414,12 @@ export class RemoteClient {
       doc?.removeEventListener("visibilitychange", onVisibility);
       win?.removeEventListener("online", onOnline);
     };
+  }
+
+  /** Tells the Mac whether the app is in front, so it knows when the phone is looking. */
+  private sendVisibility(): void {
+    const doc = this.env ? this.env.document : (globalThis as { document?: WakeEnv["document"] }).document;
+    this.sendFrame({ t: "visibility", visible: doc?.visibilityState === "visible" });
   }
 
   /** The app is in front again, or the network came back. */
@@ -434,7 +469,10 @@ export class RemoteClient {
         if (typeof frame.mac?.name === "string" && frame.mac.name) this.currentMacName = frame.mac.name;
         this.setState("open");
         this.startHeartbeat();
+        // The Mac counts this socket as looking from the welcome until visibility says otherwise.
+        this.sendVisibility();
         if (this.subscription) this.sendFrame({ t: "sub", ...this.subscription });
+        this.emit("welcome", frame);
         break;
       case "projects":
         if (!Array.isArray(frame.projects)) break;
@@ -499,7 +537,7 @@ export class RemoteClient {
     this.acks.delete(ack.id);
     this.timers.clearTimeout(pending.timer);
     if (ack.ok) pending.resolve(ack);
-    else pending.reject(new RemoteError(ack.error || "failed"));
+    else pending.reject(new RemoteError(ack.error || "failed", ack.error || "failed", typeof ack.status === "number" ? ack.status : undefined));
   }
 
   // ---- outgoing ----

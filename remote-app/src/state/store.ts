@@ -1,9 +1,25 @@
 // The app's state and everything that changes it. The screens read `store.state` and call the methods;
 // live data comes from a Source: RemoteClient for a paired Mac, DemoSource for `?demo`.
 
-import { RemoteClient, pairWithMac, type ClientState } from "../lib/client";
+import { RemoteClient, RemoteError, pairWithMac, type ClientState } from "../lib/client";
 import { loadMacs, removeMac as forgetMac, selectMac, selectedMacId, upsertMac, type Mac } from "../lib/macs";
 import { defaultDeviceName, parsePairingInput, type PairingInput } from "../lib/pairing";
+import {
+  currentSetup,
+  isPushOn,
+  loadPushPrefs,
+  parseOpenLink,
+  pushSupport,
+  savePushPrefs,
+  setBadgeCount,
+  setPushOn,
+  subscribePush,
+  unsubscribePush,
+  type PushEnv,
+  type PushPrefs,
+  type PushSetup,
+  type PushSupport,
+} from "../lib/push";
 import type {
   Choice,
   ContentBlock,
@@ -18,6 +34,7 @@ import type {
   SessionSummary,
   SnapshotFrame,
   StreamFrame,
+  WelcomeFrame,
 } from "../lib/protocol";
 import { EMPTY_STREAM, applyStreamEvent, streamAfterMessage, type LocalMessage, type StreamState } from "../lib/transcript";
 import { DEMO_MAC_ID, DEMO_MAC_NAME, DEMO_MAC_URL, DemoSource, type DemoOptions } from "./demo-source";
@@ -96,6 +113,19 @@ export interface Toast {
   tone: "info" | "error" | "success";
 }
 
+/** Notifications on this phone and on the connected Mac. */
+export interface PushState {
+  support: PushSupport;
+  /** Notifications are turned on on this phone. */
+  on: boolean;
+  busy: boolean;
+  prefs: PushPrefs;
+  /** Whether the connected Mac holds this phone's subscription. */
+  mac: "on" | "off" | "unknown" | "unsupported";
+  /** The Mac's error code for the last push_set. */
+  error: string | null;
+}
+
 export interface AppState {
   demo: boolean;
   macs: Mac[];
@@ -110,6 +140,7 @@ export interface AppState {
    */
   refusal: { code: string; message: string } | null;
   projects: Project[];
+  push: PushState;
   route: Route;
   nav: Nav;
   view: SessionView | null;
@@ -128,6 +159,8 @@ export interface StoreOptions {
   demoOptions?: DemoOptions;
   /** Makes the source for a Mac (tests); RemoteClient for a paired Mac, DemoSource for the demo by default. */
   createSource?: (mac: Mac, demo: boolean) => Source;
+  /** The browser's push APIs (tests); the real ones by default. */
+  pushEnv?: PushEnv;
 }
 
 // ---- helpers ------------------------------------------------------------------------------------
@@ -221,6 +254,7 @@ export class Store {
   private readonly listeners = new Set<() => void>();
   private readonly demoOptions: DemoOptions | undefined;
   private readonly createSource: ((mac: Mac, demo: boolean) => Source) | undefined;
+  private readonly pushEnv: PushEnv | undefined;
   private source: Source | null = null;
   private unwire: Array<() => void> = [];
   private readonly drafts = new Map<string, string>();
@@ -237,6 +271,7 @@ export class Store {
   constructor(options: StoreOptions) {
     this.demoOptions = options.demoOptions;
     this.createSource = options.createSource;
+    this.pushEnv = options.pushEnv;
     const macs = options.demo ? [demoMac()] : loadMacs();
     const macId = options.demo ? DEMO_MAC_ID : selectedMacId();
     this.state = {
@@ -247,6 +282,14 @@ export class Store {
       remoteOff: false,
       refusal: null,
       projects: [],
+      push: {
+        support: pushSupport(options.pushEnv),
+        on: isPushOn(options.pushEnv),
+        busy: false,
+        prefs: loadPushPrefs(options.pushEnv),
+        mac: "unknown",
+        error: null,
+      },
       route: macs.length ? { name: "home" } : { name: "pair" },
       nav: "replace",
       view: null,
@@ -286,22 +329,25 @@ export class Store {
 
   // ---- start and stop ----
 
-  /** Reads the URL (`#pair=`, demo deep links), restores the route after a reload and connects. */
+  /** Reads the URL (`#pair=`, a notification's link, demo deep links), restores the route after a reload and connects. */
   start(): void {
     if (this.started) return;
     this.started = true;
     window.addEventListener("popstate", this.onPopState);
 
     const pairText = pairFragment(location.hash);
+    const link = parseOpenLink(location.search);
     const saved: unknown = history.state?.cce;
     let route: Route = this.state.route;
     if (!pairText && isRoute(saved) && this.state.macs.length) route = saved;
     this.historyIndex = typeof history.state?.i === "number" ? history.state.i : 0;
-    // The fragment carries a one-time code: it never stays in the address or the history.
-    history.replaceState({ cce: route, i: this.historyIndex }, "", location.pathname + location.search);
+    // The fragment carries a one-time code and a notification's link carries the session: neither stays
+    // in the address or the history.
+    history.replaceState({ cce: route, i: this.historyIndex }, "", link ? location.pathname : location.pathname + location.search);
     this.applyRoute(route, "replace");
 
     if (this.state.macId) this.connectTo(this.state.macId);
+    if (link) this.openFromLink(link);
     if (pairText) this.beginPair(pairText, true);
     if (this.state.demo) this.demoDeepLink(new URLSearchParams(location.search));
   }
@@ -390,6 +436,14 @@ export class Store {
     this.navigate({ name: "session", project, session });
   }
 
+  /** Opens the session a notification was about, on the Mac that sent it (matched by its device id). */
+  openFromLink(link: { mac: string; project: string; session: string }): void {
+    const mac = this.state.macs.find((m) => m.deviceId === link.mac);
+    if (!mac) return;
+    if (mac.id !== this.state.macId) this.switchMac(mac.id);
+    this.openSession(link.project, link.session);
+  }
+
   newSession(project: string): void {
     this.navigate({ name: "new", project });
   }
@@ -402,10 +456,12 @@ export class Store {
     if (!mac) {
       this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [] });
       this.updateBadge();
+      this.updatePushBadge(this.state.projects);
       return;
     }
     this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [] });
     this.updateBadge();
+    this.updatePushBadge(this.state.projects);
     if (this.createSource) this.useSource(this.createSource(mac, this.state.demo));
     else this.useSource(this.state.demo ? new DemoSource(this.demoOptions) : new RemoteClient(mac));
   }
@@ -414,9 +470,11 @@ export class Store {
     this.source = source;
     this.unwire = [
       source.on("state", (conn) => this.onState(conn)),
+      source.on("welcome", (frame) => this.onWelcome(frame)),
       source.on("projects", (projects) => {
         this.set({ projects });
         this.updateBadge();
+        this.updatePushBadge(projects);
         this.watchForStartedSession();
       }),
       source.on("snapshot", (frame) => this.onSnapshot(frame)),
@@ -452,6 +510,109 @@ export class Store {
   /** Try again now (after "offline" or "unauthorized"). */
   reconnect(): void {
     this.source?.connect();
+  }
+
+  // ---- notifications ----
+
+  /**
+   * A Mac is ready for requests. While notifications are on, the subscription, keys and prefs are sent
+   * again; a subscription or permission that went away turns them off here.
+   */
+  private async onWelcome(_frame: WelcomeFrame): Promise<void> {
+    if (!this.state.push.on) return;
+    const setup = await currentSetup(this.state.push.prefs, this.pushEnv);
+    if (!setup) {
+      setPushOn(false, this.pushEnv);
+      this.set({ push: { ...this.state.push, on: false, busy: false, mac: "unknown", error: null } });
+      this.toast("Notifications were turned off on this iPhone", "info");
+      this.clearPushOnMac();
+      return;
+    }
+    await this.sendPushSetup(setup);
+  }
+
+  private async sendPushSetup(setup: PushSetup): Promise<void> {
+    const source = this.source;
+    if (!source || this.state.conn !== "open") return;
+    try {
+      await source.pushSet(setup);
+      this.set({ push: { ...this.state.push, mac: "on", error: null } });
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "unknown_type") this.set({ push: { ...this.state.push, mac: "unsupported", error: null } });
+      else this.set({ push: { ...this.state.push, mac: "off", error: code } });
+    }
+  }
+
+  private clearPushOnMac(): void {
+    const source = this.source;
+    if (!source || this.state.conn !== "open") return;
+    void source.pushClear().catch(() => undefined);
+  }
+
+  /** Turns notifications on: the permission prompt and the subscription come first, then the Mac. */
+  async enablePush(): Promise<void> {
+    if (this.state.push.busy) return;
+    this.set({ push: { ...this.state.push, busy: true, error: null } });
+    let setup: PushSetup;
+    try {
+      setup = await subscribePush(this.state.push.prefs, this.pushEnv);
+    } catch (error) {
+      this.set({ push: { ...this.state.push, busy: false, support: pushSupport(this.pushEnv), error: errorCode(error) } });
+      return;
+    }
+    setPushOn(true, this.pushEnv);
+    this.set({ push: { ...this.state.push, on: true, busy: false, support: "ok", mac: "unknown", error: null } });
+    await this.sendPushSetup(setup);
+  }
+
+  /** Turns notifications off: this phone's subscription goes, and the Mac forgets it. */
+  async disablePush(): Promise<void> {
+    setPushOn(false, this.pushEnv);
+    this.set({ push: { ...this.state.push, on: false, busy: false, mac: "unknown", error: null } });
+    await unsubscribePush(this.pushEnv);
+    this.clearPushOnMac();
+  }
+
+  /** Saves a notification preference and sends the new setup to the connected Mac. */
+  async setPushPref(key: keyof PushPrefs, value: boolean): Promise<void> {
+    const prefs: PushPrefs = { ...this.state.push.prefs, [key]: value };
+    savePushPrefs(prefs, this.pushEnv);
+    this.set({ push: { ...this.state.push, prefs } });
+    if (!this.state.push.on || !this.source || this.state.conn !== "open") return;
+    const setup = await currentSetup(prefs, this.pushEnv);
+    if (setup) await this.sendPushSetup(setup);
+  }
+
+  /** Asks the connected Mac for a test notification and says how it went. */
+  async testPush(): Promise<void> {
+    if (!this.source || this.state.conn !== "open") {
+      this.toast(errorText("not_connected", this.macName), "error");
+      return;
+    }
+    try {
+      await this.source.pushTest();
+      this.toast("Test notification sent.", "success");
+    } catch (error) {
+      const code = errorCode(error);
+      const status = error instanceof RemoteError ? error.status : undefined;
+      if (code === "push_off") {
+        this.toast(`Notifications are off on ${this.macName}. Turn them on in the Connection tab on the Mac.`, "error");
+      } else if (code === "push_gone") {
+        setPushOn(false, this.pushEnv);
+        this.set({ push: { ...this.state.push, on: false, mac: "unknown", error: null } });
+        this.toast("Notifications were turned off on this iPhone", "info");
+      } else if (code === "push_failed") {
+        this.toast(
+          status !== undefined ? `The push service didn't accept the test notification (status ${status}).` : "The push service didn't accept the test notification.",
+          "error",
+        );
+      } else if (code === "demo") {
+        this.toast("Notifications aren't available in the demo.", "info");
+      } else {
+        this.toast(errorText(code, this.macName), "error");
+      }
+    }
   }
 
   // ---- session events ----
@@ -836,13 +997,11 @@ export class Store {
   private updateBadge(): void {
     const waiting = waitingCount(this.state.projects);
     document.title = waiting > 0 ? `(${waiting}) CCE Remote` : "CCE Remote";
-    const nav = navigator as Navigator & { setAppBadge?: (count?: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
-    try {
-      const done = waiting > 0 ? nav.setAppBadge?.(waiting) : nav.clearAppBadge?.();
-      done?.catch(() => undefined);
-    } catch {
-      // not supported here
-    }
+  }
+
+  /** The home-screen badge sums the waiting sessions of every paired Mac, as last heard from each. */
+  private updatePushBadge(projects: readonly Project[]): void {
+    void setBadgeCount(this.mac?.deviceId ?? "", waitingCount(projects), this.pushEnv);
   }
 
   toast(text: string, tone: Toast["tone"] = "info"): void {
