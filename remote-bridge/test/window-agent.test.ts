@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { classifyPending } from "../lib/answers.js";
 import { toPhoneMessage } from "../lib/transcript.js";
 import { AGENT_LIMITS, WindowAgent } from "../lib/window-agent.js";
-import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, type Message } from "./fake-extension";
+import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, wireUsage, type FakeProvider, type Message } from "./fake-extension";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const MB = 1024 * 1024;
@@ -117,13 +117,16 @@ interface Options {
   refreshDelayMs?: number;
   hostReadMs?: number;
   wakeWaitMs?: number;
+  /** The provider has Claude Code's usage meter (`panelUsageRelay`), wired to both comms. */
+  usage?: boolean;
+  usageReadMs?: number;
   /** Runs before the agent instruments the comms, e.g. to put an instance method in front of the fake's. */
-  before?: (comms: { sidebar: FakeComms; tab: FakeComms }) => void;
+  before?: (comms: { sidebar: FakeComms; tab: FakeComms; provider: FakeProvider }) => void;
 }
 
 function windowWith(options: Options = {}) {
   const vscode = options.vscode ?? createFakeVscode();
-  const provider = createFakeProvider();
+  const provider = createFakeProvider({ usage: options.usage });
   const sessions = options.sessions ?? LISTED;
   const sidebar = createFakeComms({ sessions });
   const tab = createFakeComms({ sessions });
@@ -131,7 +134,8 @@ function windowWith(options: Options = {}) {
   tab.openChannel("c2", "s2");
   provider.allComms.add(sidebar);
   provider.allComms.add(tab);
-  options.before?.({ sidebar, tab });
+  if (options.usage) wireUsage(provider);
+  options.before?.({ sidebar, tab, provider });
   const logs: string[] = [];
   const agent = new WindowAgent({
     provider,
@@ -143,15 +147,18 @@ function windowWith(options: Options = {}) {
     refreshDelayMs: options.refreshDelayMs,
     hostReadMs: options.hostReadMs,
     wakeWaitMs: options.wakeWaitMs,
+    usageReadMs: options.usageReadMs,
   });
   const events: Array<[string, any]> = [];
   const projects: any[] = [];
   const attention: any[] = [];
+  const usage: any[] = [];
   agent.on("session", (session: string, ev: any) => events.push([session, ev]));
   agent.on("project", (project: any) => projects.push(project));
   agent.on("attention", (ev: any) => attention.push(ev));
+  agent.on("usage", (reading: any) => usage.push(reading));
   agent.start();
-  return { vscode, provider, sidebar, tab, agent, events, projects, attention, logs };
+  return { vscode, provider, sidebar, tab, agent, events, projects, attention, usage, logs };
 }
 
 // claude-vscode.editor.open(sessionId, initialPrompt, viewColumn, groupId, fullEditor, options). The extension takes
@@ -1840,5 +1847,131 @@ describe("snapshot", () => {
     await agent.refreshProject();
     expect(logs.filter((line) => line.includes("did not come"))).toHaveLength(1);
     expect(logs.filter((line) => line.includes("could not list"))).toEqual([]);
+  });
+});
+
+// ---- usage: Claude Code's usage meter (the provider's panelUsageRelay) ------------------------------
+
+describe("usage", () => {
+  const W = { utilization: 0.5, resetsAt: 2_000_000_000 };
+  const WEEK = { utilization: 0.1, resetsAt: 2_000_100_000 };
+  const relayOf = (provider: FakeProvider) => provider.panelUsageRelay!;
+  const usageSends = (comms: FakeComms) => comms.sent.filter((m) => m.type === "request" && m.request?.type === "panel_usage_update");
+
+  /** A query that answers the usage read with `rate_limits`, and records what it was called with. */
+  function usageQuery(rateLimits: unknown) {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async (options?: unknown) => {
+        calls.push(options);
+        return { rate_limits: rateLimits };
+      },
+    };
+  }
+
+  test("numbers found at start are the reading, without at", () => {
+    const { agent, usage } = windowWith({
+      usage: true,
+      now: () => 5_000,
+      before: ({ provider }) => {
+        relayOf(provider).merged = { five_hour: W };
+      },
+    });
+    expect(agent.usageReading()).toEqual({ supported: true, fiveHour: W });
+    expect(usage).toEqual([]);
+  });
+
+  test("a real update becomes the reading with at, and emits once", () => {
+    const { provider, sidebar, tab, usage } = windowWith({ usage: true, now: () => 5_000 });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W, seven_day: WEEK });
+    expect(usage).toEqual([{ supported: true, fiveHour: W, week: WEEK, at: 5_000 }]);
+    expect(usageSends(sidebar)).toHaveLength(1);
+    expect(usageSends(tab)).toHaveLength(1);
+  });
+
+  test("a seed re-send changes nothing", () => {
+    let t = 5_000;
+    const { agent, provider, sidebar, usage } = windowWith({ usage: true, now: () => t });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    t = 9_000;
+    relayOf(provider).seed(sidebar);
+    expect(usageSends(sidebar)).toHaveLength(2);
+    expect(usage).toHaveLength(1);
+    expect(agent.usageReading().at).toBe(5_000);
+  });
+
+  test("an update with the same numbers moves at", () => {
+    let t = 5_000;
+    const { provider, usage } = windowWith({ usage: true, now: () => t });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    t = 9_000;
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    expect(usage).toEqual([
+      { supported: true, fiveHour: W, at: 5_000 },
+      { supported: true, fiveHour: W, at: 9_000 },
+    ]);
+  });
+
+  test("a logout's null is noticed at the next refreshProject", async () => {
+    const { agent, provider, usage } = windowWith({ usage: true, now: () => 5_000 });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    relayOf(provider).merged = null; // the host's onLogout: nothing is sent
+    await agent.refreshProject();
+    expect(usage.at(-1)).toEqual({ supported: true });
+  });
+
+  test("without a relay, usage is unsupported", async () => {
+    const { agent } = windowWith();
+    expect(agent.usageReading()).toEqual({ supported: false });
+    expect(await agent.refreshUsage()).toEqual({ refreshed: false, reason: "not_supported", reading: { supported: false } });
+  });
+
+  test("refreshUsage reads through a running channel", async () => {
+    const { agent, sidebar } = windowWith({ usage: true });
+    const query = usageQuery({ five_hour: { utilization: 42, resets_at: "2033-05-18T03:33:20Z" } });
+    sidebar.channels.get("c1")!.query = query;
+    const result = await agent.refreshUsage();
+    expect(result.refreshed).toBe(true);
+    expect(result.reading.fiveHour).toEqual({ utilization: 0.42, resetsAt: 2_000_000_000 });
+    expect(query.calls).toEqual([{ skipBehaviors: true }]);
+  });
+
+  test("a channel at rest is preferred", async () => {
+    const { agent, sidebar, tab } = windowWith({ usage: true });
+    const busy = usageQuery({ five_hour: { utilization: 10, resets_at: null } });
+    const idle = usageQuery({ five_hour: { utilization: 20, resets_at: null } });
+    const c1 = sidebar.channels.get("c1")!;
+    const c2 = tab.channels.get("c2")!;
+    c1.atRest = false;
+    c1.query = busy;
+    c2.atRest = true;
+    c2.query = idle;
+    const result = await agent.refreshUsage();
+    expect(busy.calls).toEqual([]);
+    expect(idle.calls).toHaveLength(1);
+    expect(result).toMatchObject({ refreshed: true, reading: { fiveHour: { utilization: 0.2 } } });
+  });
+
+  test("no running channel: no_session", async () => {
+    const { agent } = windowWith({ usage: true });
+    expect(await agent.refreshUsage()).toEqual({ refreshed: false, reason: "no_session", reading: { supported: true } });
+  });
+
+  test("a read that never answers ends after usageReadMs", async () => {
+    const { agent, sidebar } = windowWith({ usage: true, usageReadMs: 50 });
+    sidebar.usageReadTimeoutMs = 200; // the host's own bound, so nothing outlives the test
+    sidebar.channels.get("c1")!.query = { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => new Promise(() => {}) };
+    const started = Date.now();
+    const result = await agent.refreshUsage();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(result).toEqual({ refreshed: false, reading: { supported: true } });
+  });
+
+  test("a read without numbers is not refreshed", async () => {
+    const { agent, sidebar } = windowWith({ usage: true });
+    sidebar.channels.get("c1")!.query = usageQuery(null);
+    const result = await agent.refreshUsage();
+    expect(result.refreshed).toBe(false);
   });
 });

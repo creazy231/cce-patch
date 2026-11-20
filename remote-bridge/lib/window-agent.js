@@ -30,6 +30,8 @@
 //                                     (the session's live prompts, every time they may have changed)
 //                                 | {kind:'done', session, title, isError, durationMs, text}
 //                                     (a turn ended)
+//   'usage' (reading)          Claude Code's usage meter changed: {supported, fiveHour?, week?, at?}
+//                              (see UsageReading; refreshUsage() reads it afresh through a Claude process)
 //
 // Every window of every patched editor runs an agent, so while remote access is off (the coordinator
 // says so: setEnabled) it maps, keeps and emits no session messages at all; it only follows the few
@@ -80,8 +82,20 @@ const { classifyPending, buildAnswer } = require('./answers.js');
  * @typedef {{ id: string, archived: boolean, at: number, customTitle?: string, summary?: string,
  *   gitBranch?: string, worktree?: string }} ListEntry
  */
+/**
+ * One limit of Claude Code's usage meter: `utilization` is a fraction (0.42 is 42 %), `resetsAt` epoch seconds.
+ * @typedef {{ utilization: number, resetsAt?: number }} UsageWindow
+ */
+/**
+ * The window's usage meter as the phone needs it: `supported` when the extension has the meter (its
+ * `panelUsageRelay`), the 5-hour and weekly limits when it has numbers, and `at` (epoch ms) when the agent
+ * saw those numbers arrive; no `at` for numbers that were there when the agent started.
+ * @typedef {{ supported: boolean, fiveHour?: UsageWindow, week?: UsageWindow, at?: number }} UsageReading
+ */
 
 const INJECTED_ID_PREFIX = 'cce-remote-';
+/** The usage relay's `merged` before the agent first looked at it. */
+const UNSEEN = Symbol('unseen');
 const CCE_REQUEST_PREFIX = 'cce_remote_';
 const OPEN_EDITOR = 'claude-vscode.editor.open';
 // editor.open's options (its sixth argument): an open a program asks for, as VS Code's own session list does.
@@ -106,6 +120,7 @@ const AGENT_LIMITS = Object.freeze({
   images: 4, // images in a message from the phone
   imageChars: 5 * 1024 * 1024, // base64 characters of one image
   hostReadMs: 10_000, // how long a transcript or session list read of the host may take
+  usageReadMs: 15_000, // how long refreshUsage() waits for a usage read through a Claude process
 });
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -204,6 +219,29 @@ function getFrom(map, key) {
 function unref(timer) {
   if (timer && typeof timer.unref === 'function') timer.unref();
   return timer;
+}
+
+/**
+ * One limit of the usage relay's numbers, as a reading keeps it: undefined unless `utilization` is a finite
+ * number; `resetsAt` only when it is one too.
+ * @param {unknown} window
+ * @returns {UsageWindow | undefined}
+ */
+function usageWindow(window) {
+  if (!isRecord(window) || typeof window.utilization !== 'number' || !Number.isFinite(window.utilization)) return undefined;
+  /** @type {UsageWindow} */
+  const out = { utilization: window.utilization };
+  if (typeof window.resetsAt === 'number' && Number.isFinite(window.resetsAt)) out.resetsAt = window.resetsAt;
+  return out;
+}
+
+/** @param {UsageReading} reading @returns {UsageReading} a copy nobody else holds */
+function copyReading(reading) {
+  return {
+    ...reading,
+    ...(reading.fiveHour && { fiveHour: { ...reading.fiveHour } }),
+    ...(reading.week && { week: { ...reading.week } }),
+  };
 }
 
 /**
@@ -447,14 +485,15 @@ function userMessage(text, images) {
 class WindowAgent extends EventEmitter {
   /**
    * @param {{ provider?: any, vscode?: any, log?: (line: string) => void, now?: () => number,
-   *   channelWaitMs?: number, wakeWaitMs?: number, refreshEveryMs?: number, refreshDelayMs?: number, hostReadMs?: number }} [options]
+   *   channelWaitMs?: number, wakeWaitMs?: number, refreshEveryMs?: number, refreshDelayMs?: number, hostReadMs?: number,
+   *   usageReadMs?: number }} [options]
    *   provider: the extension's webview provider (`allComms`, `sessionStates`, `unreadSessionKeys`,
    *   `liveElsewhereSessions`); vscode: the `vscode` module; log: one line of text per call (no
    *   secrets are ever in it); channelWaitMs: how long send() waits for a channel to open, and for a new
    *   session to be named; wakeWaitMs: how long it waits for one after opening a session that VS Code shows
    *   without a Claude Code process; refreshEveryMs / refreshDelayMs: while active, the project is refreshed this
    *   often, and this long after a change; hostReadMs: how long a transcript or session list read may take
-   *   before the agent goes on without it.
+   *   before the agent goes on without it; usageReadMs: how long refreshUsage() waits for its read.
    */
   constructor({
     provider,
@@ -466,6 +505,7 @@ class WindowAgent extends EventEmitter {
     refreshEveryMs = 15_000,
     refreshDelayMs = 1_000,
     hostReadMs = AGENT_LIMITS.hostReadMs,
+    usageReadMs = AGENT_LIMITS.usageReadMs,
   } = {}) {
     super();
     this.provider = provider;
@@ -477,6 +517,7 @@ class WindowAgent extends EventEmitter {
     this.refreshEveryMs = refreshEveryMs;
     this.refreshDelayMs = refreshDelayMs;
     this.hostReadMs = hostReadMs;
+    this.usageReadMs = usageReadMs;
     /** @type {Set<string>} host reads that took too long once already (each is logged once) */
     this._slowReads = new Set();
     /**
@@ -509,6 +550,12 @@ class WindowAgent extends EventEmitter {
     this._firstSeen = new Map();
     /** @type {ListEntry[] | null} the last session list */
     this._listed = null;
+    /** @type {unknown} the usage relay's `merged` the agent last looked at (UNSEEN before the first look) */
+    this._usageRef = UNSEEN;
+    /** @type {UsageReading} */
+    this._usage = { supported: false };
+    /** @type {string | undefined} the reading as JSON, once there is one */
+    this._usageJson = undefined;
     this._listSeq = 0;
     this._listApplied = 0;
     /** @type {string | undefined} the last project emitted, as JSON */
@@ -556,6 +603,9 @@ class WindowAgent extends EventEmitter {
         this._failed(error);
       }
     }
+    // The first look at the usage meter: the bridge starts once the provider is built, so whatever changes
+    // after this is an update the agent sees arrive.
+    this._lookAtUsage();
     return this;
   }
 
@@ -723,6 +773,10 @@ class WindowAgent extends EventEmitter {
         this._onIoMessage(comms, message.channelId, message.message);
         return false;
       case 'request':
+        if (isRecord(message.request) && message.request.type === 'panel_usage_update') {
+          this._lookAtUsage(); // the usage meter's numbers, sent to every webview: not a prompt
+          return false;
+        }
         this._onRequest(comms, message);
         return false;
       case 'cancel_request': // the CLI withdrew the prompt
@@ -1251,6 +1305,7 @@ class WindowAgent extends EventEmitter {
    * @returns {Promise<Project>}
    */
   async refreshProject() {
+    this._lookAtUsage(); // a logout clears the meter without sending anything: this is when it is noticed
     this._sweep();
     await this._loadList();
     const project = this.project();
@@ -1379,6 +1434,91 @@ class WindowAgent extends EventEmitter {
 
   _refreshQuietly() {
     this.refreshProject().catch((error) => this._failed(error));
+  }
+
+  // ---- the usage meter ------------------------------------------------------------------------------------
+
+  /**
+   * Looks at Claude Code's usage meter (the provider's `panelUsageRelay.merged`). The relay makes `merged` a new
+   * object for every real update, even one with the same numbers, and leaves it as it is when it only sends the
+   * numbers again (to a webview that starts): so a new object is numbers that just arrived, stamped `at` now, and
+   * the same object is nothing new. The first look (start) takes what is there without `at` and without an event.
+   * `null` (nothing known yet, signed out) is a reading without limits. Emits `usage` when the reading changed.
+   */
+  _lookAtUsage() {
+    try {
+      const relay = guard(() => this.provider.panelUsageRelay);
+      /** @type {UsageReading} */
+      let reading;
+      if (!isRecord(relay)) {
+        reading = { supported: false };
+      } else {
+        const merged = guard(() => relay.merged, null);
+        if (merged === this._usageRef) return;
+        const first = this._usageRef === UNSEEN;
+        this._usageRef = merged;
+        reading = { supported: true };
+        if (isRecord(merged)) {
+          const fiveHour = usageWindow(merged.five_hour);
+          const week = usageWindow(merged.seven_day);
+          if (fiveHour) reading.fiveHour = fiveHour;
+          if (week) reading.week = week;
+          if (!first && (fiveHour || week)) reading.at = this.now();
+        }
+      }
+      const json = JSON.stringify(reading);
+      if (json === this._usageJson) return;
+      const baseline = this._usageJson === undefined;
+      this._usage = reading;
+      this._usageJson = json;
+      if (!baseline) this._emitSafe('usage', copyReading(reading));
+    } catch (error) {
+      this._failed(error);
+    }
+  }
+
+  /** The window's usage meter, as the agent last saw it (a copy). @returns {UsageReading} */
+  usageReading() {
+    this._lookAtUsage();
+    return copyReading(this._usage);
+  }
+
+  /**
+   * Has Claude Code read the usage afresh, through the Claude process of a running session of this window (one at
+   * rest first): `relayUsageWindowsFromProcess`, which asks Anthropic and relays the answer like any update. At
+   * most usageReadMs. `refreshed` is true when new numbers arrived meanwhile. Without the meter (or the read) in
+   * this extension the reason is `not_supported`; without a running session, `no_session`. Never rejects.
+   * @returns {Promise<{ refreshed: boolean, reason?: 'no_session' | 'not_supported', reading: UsageReading }>}
+   */
+  async refreshUsage() {
+    try {
+      const relay = guard(() => this.provider.panelUsageRelay);
+      const readers = this._commsList().filter((comms) => typeof guard(() => comms.relayUsageWindowsFromProcess) === 'function');
+      if (!isRecord(relay) || readers.length === 0) return { refreshed: false, reason: 'not_supported', reading: this.usageReading() };
+      const candidates = this._allChannels().filter(
+        (ref) => readers.includes(ref.comms) && typeof guard(() => ref.channel.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET) === 'function',
+      );
+      if (candidates.length === 0) return { refreshed: false, reason: 'no_session', reading: this.usageReading() };
+      const chosen = candidates.find((ref) => guard(() => ref.channel.atRest) === true) ?? candidates[0];
+      this._lookAtUsage();
+      const before = this._usageRef;
+      /** @type {NodeJS.Timeout | undefined} */
+      let timer;
+      const gaveUp = new Promise((resolve) => {
+        timer = unref(setTimeout(resolve, this.usageReadMs));
+      });
+      try {
+        await Promise.race([Promise.resolve().then(() => chosen.comms.relayUsageWindowsFromProcess(chosen.channel.query)), gaveUp]);
+      } finally {
+        clearTimeout(timer);
+      }
+      this._lookAtUsage();
+      const refreshed = this._usageRef !== before && Boolean(this._usage.fiveHour || this._usage.week);
+      return { refreshed, reading: copyReading(this._usage) };
+    } catch (error) {
+      this._failed(error);
+      return { refreshed: false, reading: copyReading(this._usage) };
+    }
   }
 
   // ---- the phone's actions --------------------------------------------------------------------------------

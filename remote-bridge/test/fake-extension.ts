@@ -33,6 +33,12 @@
 //    already lists or holds). Read ids from the messages instead of predicting them.
 //  - The log lines (`comms.logger`, and the provider's `output`) are kept in `lines`; the fake logs
 //    the warnings and errors the host logs for the same situation.
+//  - The usage meter (2.1.325+, read from 2.1.329), with `createFakeProvider({ usage: true })` and
+//    `wireUsage`: the provider's `panelUsageRelay` merges each update into `merged` (a new object
+//    whenever the update holds a window) and sends the update itself to every webview as a
+//    `panel_usage_update` request; `seed` sends `merged` again, unchanged. A comms reads usage through
+//    a channel's `query` (`relayUsageWindowsFromProcess`) and hands the converted numbers to the relay.
+//    The fake has no CLI to ask: a test sets `channel.query`.
 //
 // Not modelled (the host differs here):
 //  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send, queued-command
@@ -116,6 +122,13 @@ export interface FakeChannel extends FakePendingChannel {
   cwd: string;
   atRest: boolean;
   turnComplete: boolean;
+  /** The CLI's SDK query, as far as a usage read uses it; the test sets it (the fake has no CLI process to ask). */
+  query?: FakeUsageQuery;
+}
+
+/** The part of the SDK query a usage read calls: the CLI's `get_usage` control request (Anthropic's usage endpoint). */
+export interface FakeUsageQuery {
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(options?: { skipBehaviors?: boolean }): Promise<any>;
 }
 
 /** A session as the test configures it; `archived` and `lastModified` default to what a listed session always has. */
@@ -173,6 +186,10 @@ export class FakeComms {
   readonly permissionModeChanges: Array<{ channelId: string; mode: string; userInitiated: boolean }> = [];
   /** The default modes the host wrote to the user's settings, oldest first: what a user-initiated `set_permission_mode` leaves behind. */
   readonly persistedDefaultModes: string[] = [];
+  /** Where this comms' usage numbers go (the host's `onRateLimitWindows`): the provider's relay once `wireUsage` ran. */
+  onRateLimitWindows?: (windows: Record<string, any>) => void;
+  /** How long a usage read may take (the host's `usageReadTimeoutMs`). */
+  usageReadTimeoutMs = 10_000;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
   private readerDead = false;
@@ -206,6 +223,35 @@ export class FakeComms {
   send(message: Message): void {
     this.sent.push(message);
     void this.webview.postMessage({ type: "from-extension", message });
+  }
+
+  /** The usage meter's numbers for this webview: a request without a channel, as the host sends it. */
+  sendPanelUsageUpdate(windows: Record<string, any>): void {
+    this.send({ type: "request", channelId: "", requestId: nextRequestId(), request: { type: "panel_usage_update", unifiedWindows: windows } });
+  }
+
+  /**
+   * Reads the usage through a Claude process (`query`) and relays what it got, as the host does: at most
+   * `usageReadTimeoutMs`, then the numbers converted like the host's t9e, handed to `onRateLimitWindows`
+   * when there is any. Never throws: a timeout or a failure is a logged warning.
+   */
+  async relayUsageWindowsFromProcess(query: FakeUsageQuery): Promise<void> {
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), this.usageReadTimeoutMs);
+      });
+      const result = await Promise.race([query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }), timedOut]);
+      clearTimeout(timer);
+      if (result === undefined) {
+        this.logger.warn("usage meter read timed out");
+        return;
+      }
+      const windows = toUsageWindows(result?.rate_limits);
+      if (windows) this.onRateLimitWindows?.(windows);
+    } catch (error) {
+      this.logger.warn(`usage meter read failed: ${error}`);
+    }
   }
 
   /** Webview → host. The host queues what it is given; its reader handles it later, in order, for as long as it lives. */
@@ -696,6 +742,79 @@ export function createFakeComms(options?: FakeCommsOptions): FakeComms {
   return new FakeComms(options);
 }
 
+// ---- the usage meter -------------------------------------------------------------------------------
+
+const USAGE_WINDOWS = ["five_hour", "seven_day", "seven_day_overage_included"];
+
+/**
+ * The host's merge of a usage update into what it holds (e9e): `null` removes a window, a window without
+ * `resetsAt` doesn't replace one that has it, anything else replaces it. Any replacement makes a new object,
+ * even with the same numbers; an update that changes nothing gives `prev` back.
+ */
+export function mergeWindows(prev: Record<string, any> | null, update: Record<string, any> | null | undefined): Record<string, any> | null {
+  if (!update) return prev;
+  const next: Record<string, any> = { ...prev };
+  let changed = false;
+  for (const key of USAGE_WINDOWS) {
+    const w = update[key];
+    if (w === null) {
+      if (next[key] !== undefined) {
+        delete next[key];
+        changed = true;
+      }
+      continue;
+    }
+    if (!w || (w.resetsAt === undefined && next[key]?.resetsAt !== undefined)) continue;
+    next[key] = w;
+    changed = true;
+  }
+  if (!changed) return prev;
+  return Object.keys(next).length === 0 ? null : next;
+}
+
+/** One window of the usage endpoint's answer, as the host converts it (IX): undefined when unusable or already reset. */
+function toUsageWindow(window: any, now: number): Record<string, any> | undefined {
+  if (!window || window.utilization === null || !Number.isFinite(window.utilization)) return undefined;
+  if (window.resets_at === null) return { utilization: window.utilization / 100 };
+  const at = Date.parse(window.resets_at);
+  if (!Number.isFinite(at) || at <= now) return undefined;
+  return { utilization: window.utilization / 100, resetsAt: Math.round(at / 1000) };
+}
+
+/** The usage endpoint's `rate_limits` as the meter's windows (the host's t9e), or null when there is none. */
+export function toUsageWindows(limits: any, now = Date.now()): Record<string, any> | null {
+  if (!limits) return null;
+  const week = toUsageWindow(limits.seven_day, now);
+  const fiveHour = limits.five_hour === null && week ? null : toUsageWindow(limits.five_hour, now);
+  let model: Record<string, any> | null | undefined;
+  if (Array.isArray(limits.model_scoped)) {
+    if (limits.model_scoped.length === 0) model = null;
+    else if (limits.model_scoped.length === 1) model = toUsageWindow(limits.model_scoped[0], now);
+  }
+  if (fiveHour === undefined && !week && model === undefined) return null;
+  return {
+    ...(fiveHour !== undefined && { five_hour: fiveHour }),
+    ...(week && { seven_day: week }),
+    ...(model !== undefined && { seven_day_overage_included: model }),
+  };
+}
+
+/** The provider's usage relay (`panelUsageRelay`): what the window's usage meter shows, sent to every webview. */
+export class FakeUsageRelay {
+  merged: Record<string, any> | null = null;
+
+  /** New numbers: merged into `merged` first, then the update itself goes to every webview. */
+  broadcast(allComms: Set<FakeComms>, update: Record<string, any>): void {
+    this.merged = mergeWindows(this.merged, update);
+    for (const comms of allComms) comms.sendPanelUsageUpdate(update);
+  }
+
+  /** A webview that starts gets what is held, unchanged (`merged` stays the same object). */
+  seed(comms: FakeComms): void {
+    if (this.merged !== null) comms.sendPanelUsageUpdate(this.merged);
+  }
+}
+
 // ---- provider --------------------------------------------------------------------------------------
 
 export interface FakeProvider {
@@ -710,6 +829,8 @@ export interface FakeProvider {
   sessionPanels: Map<string, FakePanel>;
   /** Whether the sidebar shows the session or has a channel on it (the host's `sidebarHoldsSession`); false unless a test says otherwise. */
   sidebarHoldsSession(sessionId: string): boolean;
+  /** The usage meter's relay; only with `createFakeProvider({ usage: true })` (extensions before 2.1.325 have none). */
+  panelUsageRelay?: FakeUsageRelay;
 }
 
 /** An editor tab's WebviewPanel, as far as the agent uses it. */
@@ -732,7 +853,7 @@ export function addFakePanel(provider: FakeProvider, sessionId: string): FakePan
   return panel;
 }
 
-export function createFakeProvider(): FakeProvider {
+export function createFakeProvider({ usage = false }: { usage?: boolean } = {}): FakeProvider {
   const lines: string[] = [];
   const at = lineWriter(lines);
   return {
@@ -743,7 +864,15 @@ export function createFakeProvider(): FakeProvider {
     output: { trace: at("trace"), debug: at("debug"), info: at("info"), warn: at("warn"), error: at("error"), lines },
     sessionPanels: new Map(),
     sidebarHoldsSession: () => false,
+    ...(usage && { panelUsageRelay: new FakeUsageRelay() }),
   };
+}
+
+/** Wires every comms of the provider to its usage relay, as the host does when it makes a comms (`onRateLimitWindows`). */
+export function wireUsage(provider: FakeProvider): void {
+  const relay = provider.panelUsageRelay;
+  if (!relay) throw new Error("wireUsage: the provider has no usage relay");
+  for (const comms of provider.allComms) comms.onRateLimitWindows = (windows) => relay.broadcast(provider.allComms, windows);
 }
 
 // ---- vscode ----------------------------------------------------------------------------------------
