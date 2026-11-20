@@ -81,7 +81,7 @@ const CONSENT_URL_RE = /^https:\/\/login\.tailscale\.com\//;
  * @typedef {{ enabled: boolean, role: Role, error?: string, port: number, url?: string, macName: string,
  *   tailscale: TailscaleView, serve: { configured: boolean }, windows: number, devices: DeviceView[],
  *   pairing?: PairingView, appUrl: string }} ConnectionStatus
- * @typedef {{ project(project: object): void, session(sessionId: string, ev: object): void, attention(ev: object): void, dispose(): void }} Sink
+ * @typedef {{ project(project: object): void, session(sessionId: string, ev: object): void, attention(ev: object): void, usage(reading: object): void, dispose(): void }} Sink
  */
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
@@ -247,6 +247,8 @@ async function callAgent(agent, method, args) {
     case 'active':
       agent.setActive(a.on === true);
       return undefined;
+    case 'usage':
+      return await agent.refreshUsage();
     default:
       throw codeError('unknown_method');
   }
@@ -1008,6 +1010,7 @@ class Coordinator extends EventEmitter {
       project: (project) => window.setProject(project),
       session: (sessionId, ev) => window.sessionEvent(sessionId, ev),
       attention: (ev) => window.attention(ev),
+      usage: (reading) => window.usage(reading),
       dispose: () => window.remove(),
     });
     this._setRole('hub');
@@ -1042,6 +1045,7 @@ class Coordinator extends EventEmitter {
         if (active) link.notify('session', { session: sessionId, ev });
       },
       attention: (ev) => link.notify('attention', ev), // always: it is for when no phone is connected
+      usage: (reading) => link.notify('usage', reading), // always: small, and wanted the moment a phone connects
       dispose: () => {},
     });
     this._setRole('peer');
@@ -1154,9 +1158,9 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Passes the agent's project, session and attention events to the hub. The project goes at once (the
+   * Passes the agent's project, session, attention and usage events to the hub. The project goes at once (the
    * agent emits one only when it changes, and may have sent this one to an earlier hub), then again
-   * once the session list is read. Right after the listeners are registered, the prompts that are open
+   * once the session list is read; so does the usage reading (usageReading()). Right after the listeners are registered, the prompts that are open
    * are reported again (`replayAttention`), so a hub that has just taken over learns about them.
    * @param {number} gen
    * @param {Sink} sink
@@ -1194,14 +1198,24 @@ class Coordinator extends EventEmitter {
         this._quiet(error);
       }
     };
+    /** @param {object} reading */
+    const onUsage = (reading) => {
+      try {
+        sink.usage(reading);
+      } catch (error) {
+        this._quiet(error);
+      }
+    };
     agent.on('project', onProject);
     agent.on('session', onSession);
     agent.on('attention', onAttention);
+    agent.on('usage', onUsage);
     const binding = {
       dispose: () => {
         agent.off('project', onProject);
         agent.off('session', onSession);
         agent.off('attention', onAttention);
+        agent.off('usage', onUsage);
         sink.dispose();
       },
     };
@@ -1210,6 +1224,13 @@ class Coordinator extends EventEmitter {
       onProject(agent.project());
     } catch (error) {
       this._quiet(error);
+    }
+    if (typeof agent.usageReading === 'function') {
+      try {
+        onUsage(agent.usageReading());
+      } catch (error) {
+        this._quiet(error);
+      }
     }
     // A new hub (a takeover, say) learns the prompts that were already open, now that it has the
     // window's project: a prompt that was never announced (remote access was off, or no hub listened) is

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { Coordinator } from "../lib/coordinator.js";
+import { Coordinator, callAgent } from "../lib/coordinator.js";
 import { Hub } from "../lib/hub.js";
 import { acceptPeer } from "../lib/peer-link.js";
 import { loadState, statePath, updateState } from "../lib/store.js";
@@ -1429,5 +1429,48 @@ describe("attention", () => {
     a.agent.emit("attention", done("kept"));
     expect(seen.map((event) => event.ev.title)).toEqual(["kept"]);
     expect(a.agent.listenerCount("attention")).toBe(1);
+  });
+});
+
+// ---- usage: Claude Code's usage meter, from the windows to the hub ----------------------------------
+
+describe("usage", () => {
+  /** A hub window (a) and a peer window (b) on one hub, and that hub. */
+  async function windows(options: Record<string, any> = {}) {
+    const hubs: Hub[] = [];
+    const createHub = (hubOptions: any) => {
+      const hub = new Hub(hubOptions);
+      hubs.push(hub);
+      return hub;
+    };
+    const pair = await hubAndPeer({ createHub, ...options });
+    return { ...pair, hub: hubs[0] as any };
+  }
+
+  const reading = (utilization: number, at: number) => ({ supported: true, fiveHour: { utilization, resetsAt: 2_000_000_000 }, at });
+
+  test("callAgent maps usage to refreshUsage", async () => {
+    const answer = { refreshed: true, reading: { supported: true } };
+    const agent = { refreshUsage: async () => answer };
+    expect(await callAgent(agent, "usage", {})).toEqual(answer);
+  });
+
+  test("readings from the hub's own window and from a peer reach the hub", async () => {
+    const { a, b, hub } = await windows();
+    a.agent.emit("usage", reading(0.2, 1_000));
+    expect(hub.usageFrame()).toMatchObject({ state: "ok", fiveHour: { percent: 20 }, at: 1_000 });
+    b.agent.emit("usage", reading(0.7, 2_000));
+    await until("the peer's reading", () => hub.usageFrame().fiveHour?.percent === 70);
+    expect(hub.usageFrame().at).toBe(2_000);
+  });
+
+  test("a window's reading reaches the hub when it binds", async () => {
+    const { hub } = await windows({
+      beforePeer: (b: any) => {
+        b.agent.usageReading = () => ({ supported: true, week: { utilization: 0.3 }, at: 5_000 });
+      },
+    });
+    await until("the peer's reading at bind", () => hub.usageFrame().week?.percent === 30);
+    expect(hub.usageFrame()).toEqual({ t: "usage", state: "ok", week: { percent: 30 }, at: 5_000 });
   });
 });
