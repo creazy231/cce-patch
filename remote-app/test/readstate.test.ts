@@ -66,11 +66,25 @@ describe("storage", () => {
     for (let i = 0; i < 600; i++) seen[`s${i}`] = i;
     saveReadState("mac", { baseline: 7, seen }, storage);
     const loaded = loadReadState("mac", storage)!;
-    expect(loaded.baseline).toBe(7);
+    expect(loaded.baseline).toBe(99); // past the newest session it let go (see the next test)
     expect(Object.keys(loaded.seen)).toHaveLength(READ_CAP);
     expect(loaded.seen.s99).toBeUndefined();
     expect(loaded.seen.s100).toBe(100);
     expect(loaded.seen.s599).toBe(599);
+  });
+
+  test("sessions let go at the cap don't turn new again: the baseline moves past them", () => {
+    const storage = new MemoryStorage();
+    const seen: Record<string, number> = {};
+    for (let i = 0; i < 600; i++) seen[`s${i}`] = i * 1_000;
+    const state: ReadState = { baseline: 0, seen };
+    const quiet = session("s50", 50_000); // read at 50 000, nothing happened since
+    expect(isNew(quiet, state)).toBe(false);
+    saveReadState("mac", state, storage);
+    const loaded = loadReadState("mac", storage)!;
+    expect(loaded.seen.s50).toBeUndefined();
+    expect(loaded.baseline).toBe(99_000);
+    expect(isNew(quiet, loaded)).toBe(false);
   });
 
   test("load ignores foreign data; forget removes it", () => {

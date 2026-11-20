@@ -1078,14 +1078,14 @@ describe("new on this phone", () => {
     expect(isNew(s1(), store.state.read)).toBe(false);
     phoneNow = 62_000;
     store.navigate({ name: "home" });
-    expect(store.state.read?.seen[SESSION]).toBe(62_000);
+    expect(store.state.read?.seen[SESSION]).toBe(61_000); // up to the last frame it showed
     fake.emit("projects", projectsWith(63_000));
     expect(isNew(s1(), store.state.read)).toBe(false);
-    fake.emit("projects", projectsWith(64_001));
+    fake.emit("projects", projectsWith(63_001));
     expect(isNew(s1(), store.state.read)).toBe(true);
   });
 
-  test("seen is kept up to the moment the session stops showing", () => {
+  test("seen follows the frames shown, and stops when the session stops showing", () => {
     phoneNow = 50_000;
     readStore();
     welcomeAt(50_000);
@@ -1093,17 +1093,54 @@ describe("new on this phone", () => {
     visible(true);
     store.openSession(PROJECT, SESSION);
     snapshot([said("m1", "first")]);
+    expect(store.state.read?.seen[SESSION]).toBe(50_000);
     phoneNow = 70_000;
+    fake.emit("msg", { t: "msg", project: PROJECT, session: SESSION, message: said("m2", "on screen") });
+    expect(store.state.read?.seen[SESSION]).toBe(70_000);
+    phoneNow = 72_000;
     visible(false);
     expect(store.state.read?.seen[SESSION]).toBe(70_000);
     phoneNow = 75_000;
-    fake.emit("msg", { t: "msg", project: PROJECT, session: SESSION, message: said("m2", "while hidden") });
+    fake.emit("msg", { t: "msg", project: PROJECT, session: SESSION, message: said("m3", "while hidden") });
     expect(store.state.read?.seen[SESSION]).toBe(70_000);
-    visible(true);
+    phoneNow = 76_000;
+    visible(true); // m3 is on screen now
     expect(store.state.read?.seen[SESSION]).toBe(75_000);
     phoneNow = 80_000;
     fake.emit("state", "offline");
-    expect(store.state.read?.seen[SESSION]).toBe(80_000);
+    expect(store.state.read?.seen[SESSION]).toBe(75_000);
+  });
+
+  test("coming back to a session screen marks it only up to the last frame it showed", () => {
+    phoneNow = 50_000;
+    readStore();
+    welcomeAt(50_000);
+    fake.emit("projects", projectsWith(49_000));
+    visible(true);
+    store.openSession(PROJECT, SESSION);
+    snapshot([said("m1", "first")]);
+    visible(false); // the phone is locked; Claude replies meanwhile, but nothing reaches the suspended app
+    phoneNow = 600_000;
+    visible(true); // back in front: the old socket still looks open
+    expect(store.state.read?.seen[SESSION]).toBe(50_000);
+    store.navigate({ name: "home" }); // straight on, e.g. a notification's link
+    expect(store.state.read?.seen[SESSION]).toBe(50_000);
+    fake.emit("projects", projectsWith(300_000)); // the Mac's list shows the reply
+    expect(isNew(s1(), store.state.read)).toBe(true);
+  });
+
+  test("an older Mac (no clock in the welcome): a phone clock behind it doesn't make a read session new", () => {
+    phoneNow = 50_000;
+    readStore();
+    fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" } });
+    fake.emit("projects", projectsWith(49_000));
+    visible(true);
+    store.openSession(PROJECT, SESSION);
+    snapshot([said("m1", "first")]);
+    fake.emit("projects", projectsWith(350_000)); // the Mac's clock runs 5 min ahead of this phone's
+    phoneNow = 51_000;
+    store.navigate({ name: "home" });
+    expect(isNew(s1(), store.state.read)).toBe(false);
   });
 
   test("a phone clock that runs ahead", () => {

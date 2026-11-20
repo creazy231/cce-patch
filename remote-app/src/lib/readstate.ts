@@ -56,12 +56,21 @@ export function loadReadState(macId: string, storage?: StorageLike): ReadState |
   return { baseline, seen: kept };
 }
 
-/** Keeps a Mac's read state (the READ_CAP sessions seen most recently). Never throws: storage may refuse. */
+/**
+ * Keeps a Mac's read state: the READ_CAP sessions seen most recently. The baseline moves up to the newest session it
+ * lets go, so a session read long ago doesn't turn new again once it is no longer remembered. Never throws: storage
+ * may refuse.
+ */
 export function saveReadState(macId: string, state: ReadState, storage?: StorageLike): void {
-  const entries = Object.entries(state.seen);
-  const seen = entries.length > READ_CAP ? Object.fromEntries(entries.sort((a, b) => b[1] - a[1]).slice(0, READ_CAP)) : state.seen;
+  let { baseline, seen } = state;
+  const entries = Object.entries(seen);
+  if (entries.length > READ_CAP) {
+    entries.sort((a, b) => b[1] - a[1]);
+    baseline = Math.max(baseline, entries[READ_CAP]![1]);
+    seen = Object.fromEntries(entries.slice(0, READ_CAP));
+  }
   try {
-    storageOr(storage)?.setItem(keyOf(macId), JSON.stringify({ baseline: state.baseline, seen }));
+    storageOr(storage)?.setItem(keyOf(macId), JSON.stringify({ baseline, seen }));
   } catch {
     // not kept: it still applies until the app is closed
   }

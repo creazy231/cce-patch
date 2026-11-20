@@ -297,6 +297,8 @@ export class Store {
   private skew = 0;
   /** When this phone last asked the Mac for fresh usage numbers (this phone's clock). */
   private usageAskedAt = -Infinity;
+  /** When the last frame with content (projects, snapshot, message, stream, prompts) arrived (this phone's clock). */
+  private lastFrameAt = -Infinity;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: StoreOptions) {
@@ -509,6 +511,7 @@ export class Store {
 
   private connectTo(id: string | null): void {
     this.dropSource();
+    this.lastFrameAt = -Infinity;
     const mac = this.state.macs.find((m) => m.id === id);
     this.skew = 0;
     if (!mac) {
@@ -530,6 +533,7 @@ export class Store {
       source.on("state", (conn) => this.onState(conn)),
       source.on("welcome", (frame) => this.onWelcome(frame)),
       source.on("projects", (projects) => {
+        this.lastFrameAt = this.now();
         this.set({ projects });
         this.updateBadge();
         this.updatePushBadge(projects);
@@ -739,6 +743,7 @@ export class Store {
   }
 
   private onSnapshot(frame: SnapshotFrame): void {
+    this.lastFrameAt = this.now();
     const view = this.viewFor(frame);
     if (!view) return;
     // Messages this phone sent and the Mac hasn't replayed yet stay below the history.
@@ -761,6 +766,7 @@ export class Store {
   }
 
   private onMessage(frame: MessageFrame): void {
+    this.lastFrameAt = this.now();
     const view = this.viewFor(frame);
     if (!view) return;
     const message = frame.message;
@@ -791,6 +797,7 @@ export class Store {
   }
 
   private onStream(frame: StreamFrame): void {
+    this.lastFrameAt = this.now();
     const view = this.viewFor(frame);
     if (!view) return;
     const stream = applyStreamEvent(view.stream, frame.event);
@@ -798,6 +805,7 @@ export class Store {
   }
 
   private onPending(frame: PendingFrame): void {
+    this.lastFrameAt = this.now();
     const view = this.viewFor(frame);
     if (!view) return;
     const open = new Set(frame.pending.map((p) => p.requestId));
@@ -1150,12 +1158,20 @@ export class Store {
     return route.session;
   }
 
-  /** The session was on screen until now (the Mac's clock). */
+  /**
+   * The session was on screen: read up to the last frame that reached it (not "now": back from the background, a
+   * screen shows what came before the phone was locked until the connection is checked), and at least up to the
+   * session's last activity in the list on screen, in the Mac's own clock (whatever the estimate of that clock).
+   */
   private markRead(sessionId: string): void {
     const read = this.state.read;
     const macId = this.state.macId;
     if (!read || !macId) return;
-    const next = markSeen(read, sessionId, this.macNow());
+    const route = this.state.route;
+    const listed = route.name === "session" ? (findSession(this.state.projects, route.project, sessionId)?.lastModified ?? -Infinity) : -Infinity;
+    const at = Math.max(Math.min(this.macNow(), this.lastFrameAt + this.skew), listed);
+    if (!Number.isFinite(at)) return;
+    const next = markSeen(read, sessionId, at);
     if (next === read) return;
     if (!this.state.demo) saveReadState(macId, next);
     this.set({ read: next });
