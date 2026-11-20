@@ -55,12 +55,23 @@ export function relativeTime(ms: number, now = Date.now()): string {
   return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export const STATE_LABEL: Record<SessionState, string> = {
+/**
+ * What a session's dot shows in the app. Waiting and running come from the Mac; "new" is this phone's own read
+ * state (activity not shown here yet), which replaces the Mac's "unread" (not viewed in VS Code).
+ */
+export type DotState = "waiting" | "running" | "new" | "idle";
+
+export const DOT_LABEL: Record<DotState, string> = {
   waiting: "Needs you",
   running: "Running",
-  unread: "Done",
+  new: "New",
   idle: "Idle",
 };
+
+/** The dot for a state as the Mac reports it, where the phone's read state doesn't apply (the open session). */
+export function sessionDot(state: SessionState): DotState {
+  return state === "waiting" || state === "running" ? state : "idle";
+}
 
 /** `mcp__github__create_issue` → "github · create_issue". */
 export function toolLabel(name: string): string {

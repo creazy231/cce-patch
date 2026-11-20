@@ -312,7 +312,8 @@ pre,
   animation: ping 1.9s var(--ease-out) infinite;
 }
 
-.dot-unread {
+/* New on this phone: activity this phone hasn't shown yet. */
+.dot-new {
   --c: var(--unread);
 }
 

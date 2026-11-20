@@ -185,7 +185,7 @@
   color: var(--running-ink);
 }
 
-.s-unread {
+.s-new {
   color: var(--unread-ink);
 }
 
@@ -313,7 +313,7 @@
 }
 
 .row[data-state="waiting"] .row-title,
-.row[data-state="unread"] .row-title {
+.row[data-state="new"] .row-title {
   font-weight: 600;
 }
 
@@ -329,6 +329,16 @@
   min-width: 0;
   font-size: 13px;
   color: var(--ink-2);
+}
+
+/* The Active list names each row's window first in its second line. */
+.row-window {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-weight: 550;
 }
 
 .branch {

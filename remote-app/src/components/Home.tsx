@@ -1,9 +1,12 @@
-// Home: the Mac and its open windows (projects), each with its sessions. Waiting sessions sort to the top
-// of their project, and the page warms up (the ember) while anything needs you.
+// Home: the Mac, one Active list of every session that runs or waits for you (across all windows), then each
+// open window (project) with the rest of its sessions. A green dot marks activity this phone hasn't shown yet,
+// and the page warms up (the ember) while anything needs you.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { Project, SessionState, SessionSummary } from "../lib/protocol";
-import { branchLabel, folderLabel, relativeTime, shortEditor } from "../state/format";
+import type { Project, SessionSummary } from "../lib/protocol";
+import type { ReadState } from "../lib/readstate";
+import { branchLabel, folderLabel, relativeTime, shortEditor, type DotState } from "../state/format";
+import { dotState, homeSections, tally as tallyOf, type ActiveRow, type WindowSection } from "../state/home";
 import { waitingCount } from "../state/store";
 import { Branch, ChevronDown, ChevronRight, Ellipsis, Laptop, Plus, Sliders, Terminal } from "./icons";
 import { ConnectionBanner, Sheet, StatusDot, memo, useApp, type SheetAction } from "./ui";
@@ -18,17 +21,6 @@ function useNow(everyMs: number): number {
     return () => clearInterval(timer);
   }, [everyMs]);
   return now;
-}
-
-/** Waiting first; otherwise the Mac's order (most recent activity first). */
-function ordered(sessions: SessionSummary[]): SessionSummary[] {
-  return [...sessions.filter((s) => s.state === "waiting"), ...sessions.filter((s) => s.state !== "waiting")];
-}
-
-function counts(projects: Project[]): Record<SessionState, number> {
-  const result: Record<SessionState, number> = { waiting: 0, running: 0, unread: 0, idle: 0 };
-  for (const project of projects) for (const session of project.sessions) result[session.state]++;
-  return result;
 }
 
 export function Home() {
@@ -62,8 +54,9 @@ export function Home() {
     return () => observer.disconnect();
   }, []);
 
-  const { projects, conn, macs } = state;
-  const tally = useMemo(() => counts(projects), [projects]);
+  const { projects, conn, macs, read } = state;
+  const sections = useMemo(() => homeSections(projects), [projects]);
+  const tally = useMemo(() => tallyOf(projects, read), [projects, read]);
   const waiting = waitingCount(projects);
   const mac = store.macName;
   const several = macs.length > 1;
@@ -119,6 +112,8 @@ export function Home() {
           <Summary tally={tally} projects={projects.length} conn={conn} />
         </div>
 
+        {/* the usage card goes here */}
+
         <ConnectionBanner />
 
         {projects.length === 0 ? (
@@ -136,9 +131,12 @@ export function Home() {
             <SkeletonProjects />
           )
         ) : (
-          projects.map((project) => (
-            <ProjectSection key={project.id} project={project} now={now} onMenu={setMenu} onOpen={open} />
-          ))
+          <>
+            {sections.active.length > 0 && <ActiveSection rows={sections.active} now={now} read={read} onOpen={open} />}
+            {sections.windows.map((section) => (
+              <ProjectSection key={section.project.id} section={section} now={now} read={read} onMenu={setMenu} onOpen={open} />
+            ))}
+          </>
         )}
       </div>
 
@@ -160,12 +158,12 @@ export function Home() {
   );
 }
 
-function Summary({ tally, projects, conn }: { tally: Record<SessionState, number>; projects: number; conn: string }) {
+function Summary({ tally, projects, conn }: { tally: { waiting: number; running: number; new: number }; projects: number; conn: string }) {
   if (projects === 0) return <p class="summary">{conn === "open" ? "Nothing open right now" : " "}</p>;
-  const parts: Array<[SessionState, string]> = [];
+  const parts: Array<[DotState, string]> = [];
   if (tally.waiting) parts.push(["waiting", `${tally.waiting} need${tally.waiting === 1 ? "s" : ""} you`]);
   if (tally.running) parts.push(["running", `${tally.running} running`]);
-  if (tally.unread) parts.push(["unread", `${tally.unread} done`]);
+  if (tally.new) parts.push(["new", `${tally.new} new`]);
   return (
     <p class="summary">
       {parts.length === 0 ? (
@@ -209,14 +207,46 @@ function SkeletonProjects() {
   );
 }
 
-const ProjectSection = memo(function ProjectSection(props: {
-  project: Project;
+/** Every session that runs or waits for you, from all windows; each row names its window. */
+const ActiveSection = memo(function ActiveSection(props: {
+  rows: ActiveRow[];
   now: number;
+  read: ReadState | null;
+  onOpen: (project: string, session: string) => void;
+}) {
+  return (
+    <section class="project active-list" aria-label="Active">
+      <div class="project-head">
+        <div class="project-text">
+          <h2 class="project-name">Active</h2>
+        </div>
+      </div>
+      <ul class="group" role="list">
+        {props.rows.map(({ project, session }) => (
+          <li key={`${project.id}|${session.id}`}>
+            <SessionRow
+              session={session}
+              now={props.now}
+              read={props.read}
+              windowName={project.name}
+              onOpen={() => props.onOpen(project.id, session.id)}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+});
+
+const ProjectSection = memo(function ProjectSection(props: {
+  section: WindowSection;
+  now: number;
+  read: ReadState | null;
   onMenu: (project: Project) => void;
   onOpen: (project: string, session: string) => void;
 }) {
-  const { project, now } = props;
-  const sessions = ordered(project.sessions);
+  const { now, read } = props;
+  const { project, sessions, allActive } = props.section;
   return (
     <section class="project" aria-label={project.name}>
       <div class="project-head">
@@ -242,6 +272,10 @@ const ProjectSection = memo(function ProjectSection(props: {
             Open Claude Code
           </button>
         </div>
+      ) : sessions.length === 0 && allActive ? (
+        <div class="group group-note">
+          <p>All active, see above.</p>
+        </div>
       ) : sessions.length === 0 ? (
         <div class="group group-note">
           <p>No sessions yet.</p>
@@ -253,7 +287,7 @@ const ProjectSection = memo(function ProjectSection(props: {
         <ul class="group" role="list">
           {sessions.map((session) => (
             <li key={session.id}>
-              <SessionRow session={session} now={now} onOpen={() => props.onOpen(project.id, session.id)} />
+              <SessionRow session={session} now={now} read={read} onOpen={() => props.onOpen(project.id, session.id)} />
             </li>
           ))}
         </ul>
@@ -262,13 +296,15 @@ const ProjectSection = memo(function ProjectSection(props: {
   );
 });
 
-function SessionRow({ session, now, onOpen }: { session: SessionSummary; now: number; onOpen: () => void }) {
+function SessionRow(props: { session: SessionSummary; now: number; read: ReadState | null; windowName?: string; onOpen: () => void }) {
+  const { session, now, read, windowName, onOpen } = props;
   const when = relativeTime(session.lastModified, now);
   const branch = branchLabel(session.gitBranch);
-  const hasSub = Boolean(branch || session.worktree || session.pendingCount > 0);
+  const dot = dotState(session, read);
+  const hasSub = Boolean(windowName || branch || session.worktree || session.pendingCount > 0);
   return (
-    <button type="button" class="row" data-state={session.state} onClick={onOpen}>
-      <StatusDot state={session.state} />
+    <button type="button" class="row" data-state={dot} onClick={onOpen}>
+      <StatusDot state={dot} />
       <div class="row-main">
         <div class="row-top">
           <span class="row-title">{session.title || "Untitled"}</span>
@@ -276,6 +312,7 @@ function SessionRow({ session, now, onOpen }: { session: SessionSummary; now: nu
         </div>
         {hasSub && (
           <div class="row-sub">
+            {windowName && <span class="row-window">{windowName}</span>}
             {branch && (
               <span class="branch">
                 <Branch size={13} stroke={2} />

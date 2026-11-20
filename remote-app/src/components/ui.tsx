@@ -3,8 +3,7 @@
 
 import { Component, createContext, h, type ComponentChildren, type FunctionComponent } from "preact";
 import { useContext, useEffect, useRef } from "preact/hooks";
-import type { SessionState } from "../lib/protocol";
-import { STATE_LABEL, errorText } from "../state/format";
+import { DOT_LABEL, errorText, type DotState } from "../state/format";
 import type { AppState, Store, Toast } from "../state/store";
 import { Check, ChevronLeft, Refresh, Wifi } from "./icons";
 
@@ -46,9 +45,9 @@ export function memo<P extends object>(render: FunctionComponent<P>): FunctionCo
 
 // ---- small things ----
 
-export function StatusDot({ state, label = true }: { state: SessionState; label?: boolean }) {
+export function StatusDot({ state, label = true }: { state: DotState; label?: boolean }) {
   return label ? (
-    <span class={`dot dot-${state}`} role="img" aria-label={STATE_LABEL[state]} />
+    <span class={`dot dot-${state}`} role="img" aria-label={DOT_LABEL[state]} />
   ) : (
     <span class={`dot dot-${state}`} aria-hidden="true" />
   );

@@ -4,7 +4,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ImageUpload, SessionState } from "../lib/protocol";
 import { buildTranscript, latestTodos, streamText, type Todos } from "../lib/transcript";
-import { STATE_LABEL } from "../state/format";
+import { DOT_LABEL, sessionDot } from "../state/format";
 import { findSession, waitingCount } from "../state/store";
 import { Composer } from "./Composer";
 import { ArrowDown, ChevronDown, Ellipsis, External, Stop, Terminal } from "./icons";
@@ -103,9 +103,9 @@ export function Session() {
         subtitle={
           <>
             {!isNew && (
-              <span class={`state-pill s-${sessionState}`}>
-                <StatusDot state={sessionState} label={false} />
-                {STATE_LABEL[sessionState]}
+              <span class={`state-pill s-${sessionDot(sessionState)}`}>
+                <StatusDot state={sessionDot(sessionState)} label={false} />
+                {DOT_LABEL[sessionDot(sessionState)]}
               </span>
             )}
             <span class="navbar-project">{project?.name ?? ""}</span>
