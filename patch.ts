@@ -624,11 +624,16 @@ function patchSessionsPanelCss(css: string, jsCode: string): { patched: string; 
     [`${P} .{sessionItem}:focus-visible`, "outline:1px solid var(--vscode-list-focusOutline,var(--vscode-focusBorder));outline-offset:-1px"],
     [`${P} .{actionButton}`, "padding:1px"],
     [`${P} .{actionIcon}`, "width:16px;height:16px"],
-    // "Archived sessions": a tree folder row, with VS Code's count badge.
+    // Group headers (your groups, "Ungrouped", "Archived sessions"): tree folder rows,
+    // with VS Code's count badge.
     [`${P} .{groupHeader}`, "height:28px;margin-top:0;gap:4px;padding:0 8px 0 4px;border-radius:4px"],
     [`${P} .{groupChevron}`, "width:16px;height:16px;color:var(--vscode-icon-foreground,var(--vscode-foreground))"],
     [`${P} .{groupName}`, "font-size:inherit;font-weight:400;color:var(--vscode-foreground)"],
     [`${P} .{groupCount}`, "box-sizing:border-box;min-width:18px;height:18px;padding:0 5px;border-radius:11px;font-size:11px;line-height:18px;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)"],
+    // The rows under a header are its children, indented to where the header's name starts
+    // (4px padding + 16px chevron + 4px gap). 2.1.330 indents them upstream
+    // (`.groupHeader~.sessionItem`), which the row rule above would cancel in the panel.
+    [`${P} .{groupHeader}~.{sessionItem}`, "padding-left:24px"],
   ];
   let out = "\n/* cce-patch: sessions panel — VS Code look + resize handle */";
   const skipped: string[] = [];
