@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { classifyPending } from "../lib/answers.js";
 import { toPhoneMessage } from "../lib/transcript.js";
 import { AGENT_LIMITS, WindowAgent } from "../lib/window-agent.js";
-import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, wireUsage, type FakeProvider, type Message } from "./fake-extension";
+import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, wireUsage, type FakeAuthStatus, type FakeProvider, type Message } from "./fake-extension";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const MB = 1024 * 1024;
@@ -1973,5 +1973,62 @@ describe("usage", () => {
     sidebar.channels.get("c1")!.query = usageQuery(null);
     const result = await agent.refreshUsage();
     expect(result.refreshed).toBe(false);
+  });
+
+  // ---- the account the numbers belong to: Claude Code's own `claude auth status` answer ----
+
+  const login = (email: string): FakeAuthStatus => ({ authMethod: "claudeai", email, subscriptionType: "team" });
+
+  test("the reading names the account Claude Code is signed in to", () => {
+    const { provider, sidebar, tab, usage } = windowWith({ usage: true, now: () => 5_000 });
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    tab.answerAuthStatus(login("ada@example.com"));
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    expect(usage).toEqual([{ supported: true, fiveHour: W, at: 5_000, account: "ada@example.com" }]);
+  });
+
+  test("an account learned after the numbers is noticed at the next refreshProject, and at stays", async () => {
+    let t = 5_000;
+    const { agent, provider, sidebar, usage } = windowWith({ usage: true, now: () => t });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    t = 9_000;
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    await agent.refreshProject();
+    expect(usage).toEqual([
+      { supported: true, fiveHour: W, at: 5_000 },
+      { supported: true, fiveHour: W, at: 5_000, account: "ada@example.com" },
+    ]);
+  });
+
+  test("a webview whose Claude Code hasn't answered yet is passed over", () => {
+    const { agent, tab } = windowWith({ usage: true });
+    tab.answerAuthStatus(login("ada@example.com")); // the sidebar's hasn't answered
+    expect(agent.usageReading()).toEqual({ supported: true, account: "ada@example.com" });
+  });
+
+  test("signing out takes the account away", async () => {
+    const { agent, sidebar, tab, usage } = windowWith({ usage: true });
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    tab.answerAuthStatus(login("ada@example.com"));
+    await agent.refreshProject();
+    sidebar.answerAuthStatus(undefined);
+    tab.answerAuthStatus(undefined);
+    await agent.refreshProject();
+    expect(usage).toEqual([{ supported: true, account: "ada@example.com" }, { supported: true }]);
+  });
+
+  test("without cliReportedAccountEmail (an older extension), or when it throws, the numbers still come", () => {
+    const { provider, usage } = windowWith({
+      usage: true,
+      now: () => 5_000,
+      before: ({ sidebar, tab }) => {
+        (sidebar as any).cliReportedAccountEmail = undefined;
+        (tab as any).cliReportedAccountEmail = () => {
+          throw new Error("not yet");
+        };
+      },
+    });
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    expect(usage).toEqual([{ supported: true, fiveHour: W, at: 5_000 }]);
   });
 });

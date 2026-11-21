@@ -194,6 +194,8 @@ export interface UsageFrame {
   week?: UsageLimit;
   /** When the Mac got these numbers, epoch ms (the Mac's clock). */
   at?: number;
+  /** The email of the Claude account Claude Code on the Mac is signed in to: whose limits these are. */
+  account?: string;
 }
 
 export interface ProjectsFrame {

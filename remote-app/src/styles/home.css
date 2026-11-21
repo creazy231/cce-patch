@@ -469,6 +469,29 @@
   background: var(--bg-2);
 }
 
+/* Whose limits these are: one line, cut short with an ellipsis rather than wrapped. */
+.usage-account {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0 0 -2px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.usage-account .icon {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.usage-account-email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .usage-row {
   --bar: var(--accent);
   display: grid;

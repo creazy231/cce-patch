@@ -456,7 +456,10 @@ export const demoProjects: Project[] = PROJECT_INFO.map((info) => ({
 }));
 
 /** What the Mac sends after `sub` for a demo session; an unknown id gives an empty, idle session. */
-/** The demo's usage meter: a 5-hour limit at 42 % resetting in 2 h 13 min, the week at 18 % resetting in 3 days. */
+/**
+ * The demo's usage meter: a 5-hour limit at 42 % resetting in 2 h 13 min, the week at 18 % resetting in 3 days, for
+ * a fictional account.
+ */
 export function demoUsage(at: number): UsageFrame {
   return {
     t: "usage",
@@ -464,6 +467,7 @@ export function demoUsage(at: number): UsageFrame {
     fiveHour: { percent: 42, resetsAt: at + 2 * HOUR + 13 * MINUTE },
     week: { percent: 18, resetsAt: at + 3 * DAY },
     at,
+    account: "you@example.com",
   };
 }
 

@@ -1,23 +1,36 @@
 // The usage card on the home screen: Claude Code's 5-hour and weekly limits on the Mac (the account it is logged
-// in to), as its own usage meter shows them, with when each resets and how old the numbers are.
+// in to, named at the top), as its own usage meter shows them, with when each resets and how old the numbers are.
 
 import type { UsageFrame } from "../lib/protocol";
 import { updatedText, usageRows } from "../lib/usage";
+import { Person } from "./icons";
 
 const NONE = "No usage numbers yet. They show up once Claude Code has run a session on this Mac.";
 const UNSUPPORTED = "Update Claude Code on this Mac to see usage here.";
+
+/** Whose limits these are: the email of the account Claude Code on the Mac is signed in to. */
+function Account({ email }: { email: string }) {
+  return (
+    <p class="usage-account">
+      <Person size={15} stroke={2} />
+      <span class="usage-account-email">{email}</span>
+    </p>
+  );
+}
 
 export function UsageCard({ usage, macNow }: { usage: UsageFrame; macNow: number }) {
   const rows = usage.state === "ok" ? usageRows(usage, macNow) : [];
   if (rows.length === 0) {
     return (
       <section class="usage-card" aria-label="Usage">
+        {usage.account && <Account email={usage.account} />}
         <p class="usage-note">{usage.state === "unsupported" ? UNSUPPORTED : NONE}</p>
       </section>
     );
   }
   return (
     <section class="usage-card" aria-label="Usage">
+      {usage.account && <Account email={usage.account} />}
       {rows.map((row) => (
         <div key={row.key} class={`usage-row tone-${row.tone}`}>
           <div class="usage-line">

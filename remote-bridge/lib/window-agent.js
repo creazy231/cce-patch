@@ -30,7 +30,7 @@
 //                                     (the session's live prompts, every time they may have changed)
 //                                 | {kind:'done', session, title, isError, durationMs, text}
 //                                     (a turn ended)
-//   'usage' (reading)          Claude Code's usage meter changed: {supported, fiveHour?, week?, at?}
+//   'usage' (reading)          Claude Code's usage meter changed: {supported, fiveHour?, week?, at?, account?}
 //                              (see UsageReading; refreshUsage() reads it afresh through a Claude process)
 //
 // Every window of every patched editor runs an agent, so while remote access is off (the coordinator
@@ -89,8 +89,13 @@ const { classifyPending, buildAnswer } = require('./answers.js');
 /**
  * The window's usage meter as the phone needs it: `supported` when the extension has the meter (its
  * `panelUsageRelay`), the 5-hour and weekly limits when it has numbers, and `at` (epoch ms) when the agent
- * saw those numbers arrive; no `at` for numbers that were there when the agent started.
- * @typedef {{ supported: boolean, fiveHour?: UsageWindow, week?: UsageWindow, at?: number }} UsageReading
+ * saw those numbers arrive; no `at` for numbers that were there when the agent started. `account`: the email
+ * of the Claude account Claude Code is signed in to, whose limits these are, when it knows one.
+ * @typedef {{ supported: boolean, fiveHour?: UsageWindow, week?: UsageWindow, at?: number, account?: string }} UsageReading
+ */
+/**
+ * The numbers part of a reading, kept from the last time the relay's `merged` changed.
+ * @typedef {{ fiveHour?: UsageWindow, week?: UsageWindow, at?: number }} UsageNumbers
  */
 
 const INJECTED_ID_PREFIX = 'cce-remote-';
@@ -552,6 +557,8 @@ class WindowAgent extends EventEmitter {
     this._listed = null;
     /** @type {unknown} the usage relay's `merged` the agent last looked at (UNSEEN before the first look) */
     this._usageRef = UNSEEN;
+    /** @type {UsageNumbers} what `_usageRef` held, as the reading has it */
+    this._usageNumbers = {};
     /** @type {UsageReading} */
     this._usage = { supported: false };
     /** @type {string | undefined} the reading as JSON, once there is one */
@@ -1443,7 +1450,8 @@ class WindowAgent extends EventEmitter {
    * object for every real update, even one with the same numbers, and leaves it as it is when it only sends the
    * numbers again (to a webview that starts): so a new object is numbers that just arrived, stamped `at` now, and
    * the same object is nothing new. The first look (start) takes what is there without `at` and without an event.
-   * `null` (nothing known yet, signed out) is a reading without limits. Emits `usage` when the reading changed.
+   * `null` (nothing known yet, signed out) is a reading without limits. The account is read at every look: Claude
+   * Code learns it on its own schedule, apart from the numbers. Emits `usage` when the reading changed.
    */
   _lookAtUsage() {
     try {
@@ -1454,17 +1462,23 @@ class WindowAgent extends EventEmitter {
         reading = { supported: false };
       } else {
         const merged = guard(() => relay.merged, null);
-        if (merged === this._usageRef) return;
-        const first = this._usageRef === UNSEEN;
-        this._usageRef = merged;
-        reading = { supported: true };
-        if (isRecord(merged)) {
-          const fiveHour = usageWindow(merged.five_hour);
-          const week = usageWindow(merged.seven_day);
-          if (fiveHour) reading.fiveHour = fiveHour;
-          if (week) reading.week = week;
-          if (!first && (fiveHour || week)) reading.at = this.now();
+        if (merged !== this._usageRef) {
+          const first = this._usageRef === UNSEEN;
+          this._usageRef = merged;
+          /** @type {UsageNumbers} */
+          const numbers = {};
+          if (isRecord(merged)) {
+            const fiveHour = usageWindow(merged.five_hour);
+            const week = usageWindow(merged.seven_day);
+            if (fiveHour) numbers.fiveHour = fiveHour;
+            if (week) numbers.week = week;
+            if (!first && (fiveHour || week)) numbers.at = this.now();
+          }
+          this._usageNumbers = numbers;
         }
+        reading = { supported: true, ...this._usageNumbers };
+        const account = this._signedInAccount();
+        if (account !== undefined) reading.account = account;
       }
       const json = JSON.stringify(reading);
       if (json === this._usageJson) return;
@@ -1475,6 +1489,22 @@ class WindowAgent extends EventEmitter {
     } catch (error) {
       this._failed(error);
     }
+  }
+
+  /**
+   * The email of the Claude account this window's Claude Code is signed in to, as `claude auth status` told it
+   * (each comms' `cliReportedAccountEmail()`, 2.1.330). The first comms that knows decides, as the provider's own
+   * account-change check has it; one that hasn't heard yet is passed over. Undefined when signed out, for a login
+   * without an account (an API key, a third-party provider) and in an extension without the method.
+   * @returns {string | undefined}
+   */
+  _signedInAccount() {
+    for (const comms of this._commsList()) {
+      const email = guard(() => comms.cliReportedAccountEmail());
+      if (email === undefined) continue;
+      return typeof email === 'string' && email !== '' ? email : undefined;
+    }
+    return undefined;
   }
 
   /** The window's usage meter, as the agent last saw it (a copy). @returns {UsageReading} */

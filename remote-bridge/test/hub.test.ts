@@ -2619,6 +2619,57 @@ describe("usage", () => {
     expect(frameOf("not a reading")).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 50 } }); // ignored: the last reading stays
   });
 
+  test("the frame names the account of the reading its numbers come from, never another window's", async () => {
+    const ctx = await startHub();
+    const w1 = fakeWindow(ctx.hub, { key: "w1", id: "p1" });
+    const w2 = fakeWindow(ctx.hub, { key: "w2", id: "p2" });
+    w1.handle.usage({ ...reading(5_000, 0.1), account: "ada@example.com" });
+    w2.handle.usage({ ...reading(undefined, 0.9), account: "bob@example.com" });
+    expect(ctx.hub.usageFrame()).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 10, resetsAt: R * 1000 }, at: 5_000, account: "ada@example.com" });
+    w2.handle.usage({ ...reading(6_000, 0.9), account: "bob@example.com" });
+    expect(ctx.hub.usageFrame()).toMatchObject({ fiveHour: { percent: 90 }, account: "bob@example.com" });
+    w2.handle.usage(reading(7_000, 0.9)); // its Claude Code doesn't know the account (yet): w1's could be the old one
+    expect(ctx.hub.usageFrame()).not.toHaveProperty("account");
+  });
+
+  test("without numbers, the frame names the first account a window knows; unsupported names none", async () => {
+    const ctx = await startHub();
+    const w1 = fakeWindow(ctx.hub, { key: "w1", id: "p1" });
+    const w2 = fakeWindow(ctx.hub, { key: "w2", id: "p2" });
+    w1.handle.usage({ supported: true });
+    w2.handle.usage({ supported: true, account: "ada@example.com" });
+    expect(ctx.hub.usageFrame()).toEqual({ t: "usage", state: "none", account: "ada@example.com" });
+    w1.handle.usage({ supported: false, account: "ada@example.com" });
+    w2.handle.usage({ supported: false, account: "ada@example.com" });
+    expect(ctx.hub.usageFrame()).toEqual({ t: "usage", state: "unsupported" });
+  });
+
+  test("a change of account alone reaches the phones", async () => {
+    const ctx = await startHub();
+    const { phone } = await pairedPhone(ctx);
+    const { handle } = fakeWindow(ctx.hub);
+    handle.usage({ ...reading(1_000), account: "ada@example.com" });
+    expect((await nextFrame(phone, "usage")).account).toBe("ada@example.com");
+    handle.usage({ ...reading(1_000), account: "bob@example.com" });
+    expect((await nextFrame(phone, "usage")).account).toBe("bob@example.com");
+  });
+
+  test("validation: an account that isn't a usable string is left out", async () => {
+    const ctx = await startHub();
+    const { handle } = fakeWindow(ctx.hub);
+    const accountOf = (account: unknown) => {
+      handle.usage({ supported: true, account });
+      return ctx.hub.usageFrame().account;
+    };
+    expect(accountOf("ada@example.com")).toBe("ada@example.com");
+    expect(accountOf(42)).toBeUndefined();
+    expect(accountOf("")).toBeUndefined();
+    expect(accountOf("ada\u0007@example.com")).toBeUndefined(); // a control character
+    const longest = `${"a".repeat(242)}@example.com`; // 254 characters: the longest an email address can be
+    expect(accountOf(longest)).toBe(longest);
+    expect(accountOf(`a${longest}`)).toBeUndefined();
+  });
+
   test("an unchanged reading sends nothing", async () => {
     const ctx = await startHub();
     const { phone } = await pairedPhone(ctx);

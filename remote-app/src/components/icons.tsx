@@ -173,6 +173,12 @@ export const External = icon(
     <path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
   </>,
 );
+export const Person = icon(
+  <>
+    <circle cx="12" cy="8" r="3.5" />
+    <path d="M5.5 19.5a6.5 6.5 0 0 1 13 0" />
+  </>,
+);
 export const Laptop = icon(
   <>
     <rect x="5" y="5" width="14" height="10" rx="1.8" />

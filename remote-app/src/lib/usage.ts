@@ -6,6 +6,13 @@ const STATES = new Set<UsageFrame["state"]>(["ok", "none", "unsupported"]);
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
+/** The longest an email address can be; the account is shown as text, so control characters are refused too. */
+const ACCOUNT_MAX = 254;
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+
+const isAccount = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= ACCOUNT_MAX && !CONTROL_CHAR_RE.test(value);
+
 function usageLimit(value: unknown): UsageLimit | null {
   if (!value || typeof value !== "object") return null;
   const { percent, resetsAt } = value as Record<string, unknown>;
@@ -24,6 +31,7 @@ export function parseUsageFrame(value: unknown): UsageFrame | null {
   if (fiveHour) out.fiveHour = fiveHour;
   if (week) out.week = week;
   if (isNumber(frame.at) && frame.at > 0) out.at = frame.at;
+  if (isAccount(frame.account)) out.account = frame.account;
   return out;
 }
 

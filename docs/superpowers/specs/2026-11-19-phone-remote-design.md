@@ -512,7 +512,7 @@ Hub → client:
 {t:"msg", project, session, message}
 {t:"stream", project, session, event}
 {t:"pending", project, session, pending:[Pending]}  the full list whenever it changes
-{t:"usage", state:"ok"|"none"|"unsupported", fiveHour?:{percent, resetsAt?}, week?:{percent, resetsAt?}, at?}
+{t:"usage", state:"ok"|"none"|"unsupported", fiveHour?:{percent, resetsAt?}, week?:{percent, resetsAt?}, at?, account?}
                                                     after projects on welcome, after usage_refresh, and on any change
 {t:"ack", id, ok, error?, session?, status?}
 {t:"error", code, message}                          e.g. bad_token, bad_code, revoked
@@ -542,6 +542,17 @@ ack: the hub has the windows read the usage afresh through a running session's C
 (at most once a minute, the newest reading's window first, until one got new numbers) and
 answers with a `usage` frame either way. An old bridge sends no `usage` and drops
 `usage_refresh` (an unknown frame without an id).
+
+`usage.account` (added 2026-11-21, backwards compatible) is the email of the Claude account
+Claude Code on the Mac is signed in to, as `claude auth status` reported it to the extension
+(each comms' `cliReportedAccountEmail()`, 2.1.330; the bridge reads no login files itself). In
+`ok` it is the account of the reading the numbers come from and never another window's, which
+could still be the account before a switch (a login in a terminal or another window); in `none`
+it is the first account any window knows; `unsupported` has none. It is left out while Claude
+Code doesn't know one (still asking, signed out, an API key or a third-party provider, an
+older extension). The hub and the app keep it only as a non-empty string of at most 254
+characters without control characters, and the app shows it as the card's first line. An old
+bridge sends none, and an old app ignores it.
 
 Only `bad_token`, `bad_origin` and `revoked` mean the phone itself was refused: the app
 stops and asks to pair again. Any other error (e.g. `unsupported_version` before the

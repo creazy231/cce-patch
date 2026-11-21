@@ -74,6 +74,10 @@ const DISABLED_MESSAGE = 'Remote access was turned off on the Mac';
 const USAGE_RESET_FLOOR_S = 1_704_067_200;
 const USAGE_RESET_AHEAD_S = 30 * 86_400;
 const USAGE_AT_AHEAD_MS = 60_000;
+// A reading's account (the signed-in email) is a non-empty string no longer than an email address can be, without
+// control characters.
+const USAGE_ACCOUNT_MAX = 254;
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 const CLOSE = {
   goingAway: 1001,
@@ -314,6 +318,8 @@ function usageView(reading, nowMs) {
   if (week) view.week = week;
   const at = reading.at;
   if (typeof at === 'number' && Number.isFinite(at) && at > 0 && at <= nowMs + USAGE_AT_AHEAD_MS) view.at = at;
+  const account = reading.account;
+  if (typeof account === 'string' && account.length > 0 && account.length <= USAGE_ACCOUNT_MAX && !CONTROL_CHAR_RE.test(account)) view.account = account;
   return view;
 }
 
@@ -385,9 +391,9 @@ function actionCall(frame) {
  * @typedef {{ setProject(project: unknown): void, sessionEvent(sessionId: unknown, ev: unknown): void, attention(ev: unknown): void, usage(reading: unknown): void, remove(): void }} WindowHandle
  * @typedef {{ percent: number, resetsAt?: number }} UsageLimit
  *   one limit of Claude Code's usage meter as phones get it: percent used, and when it resets (epoch ms)
- * @typedef {{ supported: boolean, fiveHour?: UsageLimit, week?: UsageLimit, at?: number }} UsageView
- *   a window's last usage reading, checked: whether its Claude Code has the meter, its numbers, and when
- *   they arrived (epoch ms)
+ * @typedef {{ supported: boolean, fiveHour?: UsageLimit, week?: UsageLimit, at?: number, account?: string }} UsageView
+ *   a window's last usage reading, checked: whether its Claude Code has the meter, its numbers, when they
+ *   arrived (epoch ms), and the email of the account it is signed in to
  * @typedef {{ code: string, expiresAt: number, link: string, qr: { size: number, path: string } | null }} PairingView
  *   code as XXXX-XXXX; link and qr are empty while the Mac's Tailscale DNS name is unknown
  */
@@ -737,28 +743,34 @@ class Hub extends EventEmitter {
   /**
    * The usage frame for the phones: `unsupported` when no window's Claude Code has the usage meter (or no window
    * is open), `none` when one has it but no window has numbers, else `ok` with the newest numbers (by `at`;
-   * numbers without `at` count as oldest, and the first window wins a tie).
-   * @returns {{ t: 'usage', state: 'ok' | 'none' | 'unsupported', fiveHour?: UsageLimit, week?: UsageLimit, at?: number }}
+   * numbers without `at` count as oldest, and the first window wins a tie). `account` names whose numbers they
+   * are: the account of the reading they come from, and never another window's, which may still be the account
+   * before a switch. Without numbers, the first account a window knows.
+   * @returns {{ t: 'usage', state: 'ok' | 'none' | 'unsupported', fiveHour?: UsageLimit, week?: UsageLimit, at?: number, account?: string }}
    */
   usageFrame() {
     let supported = false;
     /** @type {UsageView | null} */
     let newest = null;
+    /** @type {string | undefined} */
+    let account;
     for (const win of this._windows.values()) {
       const view = win.usage;
       if (win.removed || !view || !view.supported) continue;
       supported = true;
+      account ??= view.account;
       if (!view.fiveHour && !view.week) continue;
       if (!newest || (view.at ?? -Infinity) > (newest.at ?? -Infinity)) newest = view;
     }
     if (!supported) return { t: 'usage', state: 'unsupported' };
-    if (!newest) return { t: 'usage', state: 'none' };
+    if (!newest) return { t: 'usage', state: 'none', ...(account !== undefined && { account }) };
     return {
       t: 'usage',
       state: 'ok',
       ...(newest.fiveHour && { fiveHour: { ...newest.fiveHour } }),
       ...(newest.week && { week: { ...newest.week } }),
       ...(newest.at !== undefined && { at: newest.at }),
+      ...(newest.account !== undefined && { account: newest.account }),
     };
   }
 

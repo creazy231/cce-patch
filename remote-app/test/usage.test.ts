@@ -19,6 +19,18 @@ describe("parseUsageFrame", () => {
     expect(parseUsageFrame({ t: "usage", state: "ok", fiveHour: { percent: 12, resetsAt: 0 } })).toEqual({ t: "usage", state: "ok", fiveHour: { percent: 12 } });
     expect(parseUsageFrame({ t: "usage", state: "none", at: Number.NaN })).toEqual({ t: "usage", state: "none" });
   });
+
+  test("keeps the account, in any state, and drops one that isn't a usable string", () => {
+    const accountOf = (account: unknown) => parseUsageFrame({ t: "usage", state: "none", account })?.account;
+    expect(parseUsageFrame({ t: "usage", state: "ok", week: { percent: 18 }, account: "ada@example.com" })).toEqual({ t: "usage", state: "ok", week: { percent: 18 }, account: "ada@example.com" });
+    expect(accountOf("ada@example.com")).toBe("ada@example.com");
+    expect(accountOf(42)).toBeUndefined();
+    expect(accountOf("")).toBeUndefined();
+    expect(accountOf("ada\n@example.com")).toBeUndefined();
+    const longest = `${"a".repeat(242)}@example.com`; // 254 characters: the longest an email address can be
+    expect(accountOf(longest)).toBe(longest);
+    expect(accountOf(`a${longest}`)).toBeUndefined();
+  });
 });
 
 // Dates are built in local time, so the phone's time zone doesn't matter; en-GB gives 24 h times.

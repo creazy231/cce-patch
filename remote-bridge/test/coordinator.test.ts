@@ -1464,6 +1464,13 @@ describe("usage", () => {
     expect(hub.usageFrame().at).toBe(2_000);
   });
 
+  test("a peer's reading keeps its account on the way to the hub", async () => {
+    const { b, hub } = await windows();
+    b.agent.emit("usage", { ...reading(0.7, 2_000), account: "ada@example.com" });
+    await until("the peer's reading", () => hub.usageFrame().fiveHour?.percent === 70);
+    expect(hub.usageFrame().account).toBe("ada@example.com");
+  });
+
   test("a window's reading reaches the hub when it binds", async () => {
     const { hub } = await windows({
       beforePeer: (b: any) => {

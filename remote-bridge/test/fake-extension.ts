@@ -39,6 +39,9 @@
 //    `panel_usage_update` request; `seed` sends `merged` again, unchanged. A comms reads usage through
 //    a channel's `query` (`relayUsageWindowsFromProcess`) and hands the converted numbers to the relay.
 //    The fake has no CLI to ask: a test sets `channel.query`.
+//  - The signed-in account (read from 2.1.330): each comms keeps what `claude auth status --json` answered
+//    and reports its email with `cliReportedAccountEmail()`. The fake asks nothing: a test gives the answer
+//    with `answerAuthStatus`.
 //
 // Not modelled (the host differs here):
 //  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send, queued-command
@@ -126,6 +129,13 @@ export interface FakeChannel extends FakePendingChannel {
   query?: FakeUsageQuery;
 }
 
+/** A login as the host keeps `claude auth status --json`'s answer (its gJn): how, the account's email, the plan. */
+export interface FakeAuthStatus {
+  authMethod: "claudeai" | "console" | "api-key" | "3p" | "not-specified";
+  email: string | null;
+  subscriptionType: string | null;
+}
+
 /** The part of the SDK query a usage read calls: the CLI's `get_usage` control request (Anthropic's usage endpoint). */
 export interface FakeUsageQuery {
   usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(options?: { skipBehaviors?: boolean }): Promise<any>;
@@ -190,6 +200,12 @@ export class FakeComms {
   onRateLimitWindows?: (windows: Record<string, any>) => void;
   /** How long a usage read may take (the host's `usageReadTimeoutMs`). */
   usageReadTimeoutMs = 10_000;
+  /** What `claude auth status --json` answered, as the host keeps it: the login, or undefined when signed out. */
+  cachedCliAuthStatus: FakeAuthStatus | undefined = undefined;
+  /** Whether `claude auth status` has answered (the host asks when a webview starts and after an account change). */
+  cachedCliAuthStatusFetched = false;
+  /** The host's `authManager.isThirdPartyProvider()`: with Bedrock, Vertex and the like there is no Claude account. */
+  thirdPartyProvider = false;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
   private readerDead = false;
@@ -252,6 +268,24 @@ export class FakeComms {
     } catch (error) {
       this.logger.warn(`usage meter read failed: ${error}`);
     }
+  }
+
+  /** `claude auth status --json` answered: the login as the host keeps it (its gJn), or undefined when signed out. */
+  answerAuthStatus(status: FakeAuthStatus | undefined): void {
+    this.cachedCliAuthStatus = status;
+    this.cachedCliAuthStatusFetched = true;
+  }
+
+  /**
+   * The signed-in account's email, as the host's `cliReportedAccountEmail()` reports it: undefined until `claude
+   * auth status` has answered and with a third-party provider, null when signed out, the email, or undefined for
+   * a login without one (an API key).
+   */
+  cliReportedAccountEmail(): string | null | undefined {
+    if (!this.cachedCliAuthStatusFetched || this.thirdPartyProvider) return undefined;
+    const status = this.cachedCliAuthStatus;
+    if (status === undefined) return null;
+    return typeof status.email === "string" && status.email !== "" ? status.email : undefined;
   }
 
   /** Webview → host. The host queues what it is given; its reader handles it later, in order, for as long as it lives. */

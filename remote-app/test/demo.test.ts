@@ -114,7 +114,7 @@ describe("DemoSource: usage", () => {
     source.connect();
     await tick();
     expect(frames).toHaveLength(1);
-    expect(frames[0]).toMatchObject({ t: "usage", state: "ok", fiveHour: { percent: 42 }, week: { percent: 18 } });
+    expect(frames[0]).toMatchObject({ t: "usage", state: "ok", fiveHour: { percent: 42 }, week: { percent: 18 }, account: "you@example.com" });
     source.usageRefresh();
     await tick();
     expect(frames).toHaveLength(2);
