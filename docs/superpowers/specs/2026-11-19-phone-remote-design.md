@@ -550,8 +550,12 @@ Claude Code on the Mac is signed in to, as `claude auth status` reported it to t
 could still be the account before a switch (a login in a terminal or another window); in `none`
 it is the first account any window knows; `unsupported` has none. It is left out while Claude
 Code doesn't know one (still asking, signed out, an API key or a third-party provider, an
-older extension). The hub and the app keep it only as a non-empty string of at most 254
-characters without control characters, and the app shows it as the card's first line. An old
+older extension). The pairing is as good as Claude Code's own panel: an account change clears
+the numbers and the account in one go, but a session still running from before a switch can
+report one more set of numbers (its `rate_limit_event`, which Claude Code doesn't tie to the
+account the way it does a `get_usage` read), shown with the new account until the next update.
+The hub and the app keep it only as a non-empty string of at most 254 characters without
+control, bidi or invisible characters, and the app shows it as the card's first line. An old
 bridge sends none, and an old app ignores it.
 
 Only `bad_token`, `bad_origin` and `revoked` mean the phone itself was refused: the app

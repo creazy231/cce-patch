@@ -1,17 +1,19 @@
 // Claude Code's usage meter, as the Mac sends it (the `usage` frame): checked here before the screens see it.
 
 import type { UsageFrame, UsageLimit } from "./protocol";
+import { hasInvisible } from "./text";
 
 const STATES = new Set<UsageFrame["state"]>(["ok", "none", "unsupported"]);
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
-/** The longest an email address can be; the account is shown as text, so control characters are refused too. */
+/**
+ * The longest an email address can be. The account tells accounts apart, so one with control, bidi or invisible
+ * characters (which could make it show as another address) is refused, not cleaned.
+ */
 const ACCOUNT_MAX = 254;
-const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
-const isAccount = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0 && value.length <= ACCOUNT_MAX && !CONTROL_CHAR_RE.test(value);
+const isAccount = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= ACCOUNT_MAX && !hasInvisible(value);
 
 function usageLimit(value: unknown): UsageLimit | null {
   if (!value || typeof value !== "object") return null;

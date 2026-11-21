@@ -2006,15 +2006,62 @@ describe("usage", () => {
     expect(agent.usageReading()).toEqual({ supported: true, account: "ada@example.com" });
   });
 
-  test("signing out takes the account away", async () => {
-    const { agent, sidebar, tab, usage } = windowWith({ usage: true });
+  // An account change, as the host makes it: the numbers go and every webview's answer is forgotten in one go,
+  // then `claude auth status` answers again. The old account must never be named next to the new one's numbers.
+  const W_B = { utilization: 0.05, resetsAt: 2_000_000_500 };
+
+  test("a switch outside the window: no numbers and no account, then the new account, then its numbers", async () => {
+    let t = 5_000;
+    const { agent, provider, sidebar, tab, usage } = windowWith({ usage: true, now: () => t });
     sidebar.answerAuthStatus(login("ada@example.com"));
     tab.answerAuthStatus(login("ada@example.com"));
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    provider.refreshEveryHost(); // say, another account signed in from a terminal
     await agent.refreshProject();
-    sidebar.answerAuthStatus(undefined);
+    sidebar.answerAuthStatus(login("bob@example.com"));
+    await agent.refreshProject();
+    t = 9_000;
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W_B });
+    expect(usage).toEqual([
+      { supported: true, fiveHour: W, at: 5_000, account: "ada@example.com" },
+      { supported: true },
+      { supported: true, account: "bob@example.com" },
+      { supported: true, fiveHour: W_B, at: 9_000, account: "bob@example.com" },
+    ]);
+  });
+
+  test("the new account's numbers before Claude Code knows the account come without one, not with the old", () => {
+    let t = 5_000;
+    const { provider, sidebar, tab, usage } = windowWith({ usage: true, now: () => t });
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    tab.answerAuthStatus(login("ada@example.com"));
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    provider.refreshEveryHost();
+    t = 9_000;
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W_B }); // before `claude auth status` answers again
+    expect(usage.at(-1)).toEqual({ supported: true, fiveHour: W_B, at: 9_000 });
+  });
+
+  test("a login in this window names the new account, without the old numbers", () => {
+    const { agent, provider, sidebar, tab } = windowWith({ usage: true, now: () => 5_000 });
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    tab.answerAuthStatus(login("ada@example.com"));
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    tab.answerAuthStatus(login("bob@example.com")); // the tab logged in and asked again,
+    provider.notifyLogin(tab); // then the provider drops the numbers and the others' answers
+    expect(agent.usageReading()).toEqual({ supported: true, account: "bob@example.com" });
+  });
+
+  test("signing out takes the numbers and the account away", async () => {
+    const { agent, provider, sidebar, tab, usage } = windowWith({ usage: true, now: () => 5_000 });
+    sidebar.answerAuthStatus(login("ada@example.com"));
+    tab.answerAuthStatus(login("ada@example.com"));
+    relayOf(provider).broadcast(provider.allComms, { five_hour: W });
+    provider.notifyLogout();
+    sidebar.answerAuthStatus(undefined); // asked again: signed out
     tab.answerAuthStatus(undefined);
     await agent.refreshProject();
-    expect(usage).toEqual([{ supported: true, account: "ada@example.com" }, { supported: true }]);
+    expect(usage).toEqual([{ supported: true, fiveHour: W, at: 5_000, account: "ada@example.com" }, { supported: true }]);
   });
 
   test("without cliReportedAccountEmail (an older extension), or when it throws, the numbers still come", () => {

@@ -1500,7 +1500,9 @@ class WindowAgent extends EventEmitter {
    */
   _signedInAccount() {
     for (const comms of this._commsList()) {
-      const email = guard(() => comms.cliReportedAccountEmail());
+      const report = guard(() => comms.cliReportedAccountEmail);
+      if (typeof report !== 'function') continue;
+      const email = guard(() => report.call(comms));
       if (email === undefined) continue;
       return typeof email === 'string' && email !== '' ? email : undefined;
     }

@@ -41,7 +41,10 @@
 //    The fake has no CLI to ask: a test sets `channel.query`.
 //  - The signed-in account (read from 2.1.330): each comms keeps what `claude auth status --json` answered
 //    and reports its email with `cliReportedAccountEmail()`. The fake asks nothing: a test gives the answer
-//    with `answerAuthStatus`.
+//    with `answerAuthStatus`. A change of account goes as in the host, in one go: the provider's
+//    `refreshEveryHost()` (a switch made outside the window), `notifyLogout()` and `notifyLogin(comms)` clear
+//    the relay's numbers and make the comms forget the answer (`invalidateConfigCache()`), which the host
+//    then asks again.
 //
 // Not modelled (the host differs here):
 //  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send, queued-command
@@ -204,8 +207,6 @@ export class FakeComms {
   cachedCliAuthStatus: FakeAuthStatus | undefined = undefined;
   /** Whether `claude auth status` has answered (the host asks when a webview starts and after an account change). */
   cachedCliAuthStatusFetched = false;
-  /** The host's `authManager.isThirdPartyProvider()`: with Bedrock, Vertex and the like there is no Claude account. */
-  thirdPartyProvider = false;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
   private readerDead = false;
@@ -276,13 +277,19 @@ export class FakeComms {
     this.cachedCliAuthStatusFetched = true;
   }
 
+  /** The host's `invalidateConfigCache()`, as far as the account goes: the answer is forgotten until asked again. */
+  invalidateConfigCache(): void {
+    this.cachedCliAuthStatus = undefined;
+    this.cachedCliAuthStatusFetched = false;
+  }
+
   /**
    * The signed-in account's email, as the host's `cliReportedAccountEmail()` reports it: undefined until `claude
-   * auth status` has answered and with a third-party provider, null when signed out, the email, or undefined for
-   * a login without one (an API key).
+   * auth status` has answered, null when signed out, the email, or undefined for a login without one (an API key).
+   * (The host also says undefined with a third-party provider, which the fake doesn't model.)
    */
   cliReportedAccountEmail(): string | null | undefined {
-    if (!this.cachedCliAuthStatusFetched || this.thirdPartyProvider) return undefined;
+    if (!this.cachedCliAuthStatusFetched) return undefined;
     const status = this.cachedCliAuthStatus;
     if (status === undefined) return null;
     return typeof status.email === "string" && status.email !== "" ? status.email : undefined;
@@ -836,16 +843,34 @@ export function toUsageWindows(limits: any, now = Date.now()): Record<string, an
 /** The provider's usage relay (`panelUsageRelay`): what the window's usage meter shows, sent to every webview. */
 export class FakeUsageRelay {
   merged: Record<string, any> | null = null;
+  /** Signed out: updates still go to the webviews, but nothing is kept until the next login or account change. */
+  signedOut = false;
 
-  /** New numbers: merged into `merged` first, then the update itself goes to every webview. */
+  /** New numbers: merged into `merged` first (unless signed out), then the update itself goes to every webview. */
   broadcast(allComms: Set<FakeComms>, update: Record<string, any>): void {
-    this.merged = mergeWindows(this.merged, update);
+    if (!this.signedOut) this.merged = mergeWindows(this.merged, update);
     for (const comms of allComms) comms.sendPanelUsageUpdate(update);
   }
 
   /** A webview that starts gets what is held, unchanged (`merged` stays the same object). */
   seed(comms: FakeComms): void {
     if (this.merged !== null) comms.sendPanelUsageUpdate(this.merged);
+  }
+
+  /** The account's numbers are dropped, without telling the webviews (the host's three resets; its initial-read flag isn't modelled). */
+  onLogout(): void {
+    this.merged = null;
+    this.signedOut = true;
+  }
+
+  onLogin(): void {
+    this.merged = null;
+    this.signedOut = false;
+  }
+
+  onAccountChangedOutside(): void {
+    this.merged = null;
+    this.signedOut = false;
   }
 }
 
@@ -865,6 +890,12 @@ export interface FakeProvider {
   sidebarHoldsSession(sessionId: string): boolean;
   /** The usage meter's relay; only with `createFakeProvider({ usage: true })` (extensions before 2.1.325 have none). */
   panelUsageRelay?: FakeUsageRelay;
+  /** Another account signed in outside this window (a terminal, another window): the relay's numbers go, and every comms forgets its `claude auth status` answer. */
+  refreshEveryHost(): void;
+  /** Signed out: as refreshEveryHost, and the relay keeps no numbers until the next login. */
+  notifyLogout(): void;
+  /** A login in this window, through `comms` (which has already asked again): the relay's numbers go, and the other comms forget their answer. */
+  notifyLogin(comms: FakeComms): void;
 }
 
 /** An editor tab's WebviewPanel, as far as the agent uses it. */
@@ -890,7 +921,7 @@ export function addFakePanel(provider: FakeProvider, sessionId: string): FakePan
 export function createFakeProvider({ usage = false }: { usage?: boolean } = {}): FakeProvider {
   const lines: string[] = [];
   const at = lineWriter(lines);
-  return {
+  const provider: FakeProvider = {
     allComms: new Set(),
     sessionStates: new Map(),
     unreadSessionKeys: new Set(),
@@ -899,7 +930,21 @@ export function createFakeProvider({ usage = false }: { usage?: boolean } = {}):
     sessionPanels: new Map(),
     sidebarHoldsSession: () => false,
     ...(usage && { panelUsageRelay: new FakeUsageRelay() }),
+    // The host's account changes, each in one go (no webview hears of the numbers going).
+    refreshEveryHost() {
+      provider.panelUsageRelay?.onAccountChangedOutside();
+      for (const comms of provider.allComms) comms.invalidateConfigCache();
+    },
+    notifyLogout() {
+      provider.panelUsageRelay?.onLogout();
+      for (const comms of provider.allComms) comms.invalidateConfigCache();
+    },
+    notifyLogin(loggedIn) {
+      provider.panelUsageRelay?.onLogin();
+      for (const comms of provider.allComms) if (comms !== loggedIn) comms.invalidateConfigCache();
+    },
   };
+  return provider;
 }
 
 /** Wires every comms of the provider to its usage relay, as the host does when it makes a comms (`onRateLimitWindows`). */

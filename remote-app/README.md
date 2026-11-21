@@ -71,7 +71,7 @@ A notification can wait on Apple's push service until the phone is reachable; wa
 ## The home screen
 
 - **Usage.** At the top, Claude Code's own usage meter from the Mac: how much of the 5-hour limit and the weekly limit of the Claude account it is logged in to is used, and when each resets.
-  - **Whose limits.** The card's first line is that account's email, as Claude Code itself reported it, so after switching accounts on the Mac you can see which one the numbers belong to. It is left out while Claude Code doesn't know it (just after a switch, signed out, an API key).
+  - **Whose limits.** The card's first line is that account's email, as Claude Code itself reported it, so after switching accounts on the Mac you can see which one the numbers belong to. It is left out while Claude Code doesn't know it: just after a switch, when signed out, with an API key or another provider (such as Bedrock or Vertex), or with a Claude Code version that doesn't report it (2.1.330 does).
   - **Refreshing.** The app asks for fresh numbers when it opens and every 5 minutes while it is open. The Mac also passes on new numbers whenever Claude Code learns them, which happens on every reply.
   - **When no session is open.** The Mac reads fresh numbers through a Claude Code session that is open in one of its VS Code windows, at most once a minute. Without one, the card shows the last numbers and how old they are.
   - **What it needs.** Claude Code 2.1.325 or later (older versions, such as Cursor's, have no usage meter), and a Claude subscription login. An API key has no such limits.

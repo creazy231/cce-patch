@@ -1,12 +1,12 @@
 // Small text helpers for the screens: names, paths, times and the copy for error codes.
 
 import type { SessionState } from "../lib/protocol";
+import { INVISIBLE } from "../lib/text";
 
-// Control characters, bidi overrides and invisible marks. A Mac's name arrives from a pairing link or
-// from the Mac itself; these could make it render as something it isn't.
-const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g;
-
-/** A name that is safe to show: no control or bidi characters, at most 60 characters. */
+/**
+ * A name that is safe to show: no control or bidi characters, at most 60 characters. A Mac's name arrives from a
+ * pairing link or from the Mac itself.
+ */
 export function cleanName(name: string, fallback = "Mac"): string {
   const clean = name.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
   return clean ? [...clean].slice(0, 60).join("") : fallback;

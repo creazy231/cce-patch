@@ -27,6 +27,9 @@ describe("parseUsageFrame", () => {
     expect(accountOf(42)).toBeUndefined();
     expect(accountOf("")).toBeUndefined();
     expect(accountOf("ada\n@example.com")).toBeUndefined();
+    expect(accountOf("ada\u0085@example.com")).toBeUndefined(); // a C1 control character
+    expect(accountOf("ada‮@example.com")).toBeUndefined(); // a bidi override: it could show another address
+    expect(accountOf("ada​@example.com")).toBeUndefined(); // a zero-width space
     const longest = `${"a".repeat(242)}@example.com`; // 254 characters: the longest an email address can be
     expect(accountOf(longest)).toBe(longest);
     expect(accountOf(`a${longest}`)).toBeUndefined();

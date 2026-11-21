@@ -455,7 +455,6 @@ export const demoProjects: Project[] = PROJECT_INFO.map((info) => ({
   sessions: SESSIONS.filter((s) => s.project === info.id).map((s) => ({ ...s.summary, pendingCount: s.pending.length })),
 }));
 
-/** What the Mac sends after `sub` for a demo session; an unknown id gives an empty, idle session. */
 /**
  * The demo's usage meter: a 5-hour limit at 42 % resetting in 2 h 13 min, the week at 18 % resetting in 3 days, for
  * a fictional account.
@@ -471,6 +470,7 @@ export function demoUsage(at: number): UsageFrame {
   };
 }
 
+/** What the Mac sends after `sub` for a demo session; an unknown id gives an empty, idle session. */
 export function demoSnapshot(sessionId: string): SnapshotFrame {
   const demo = SESSIONS.find((s) => s.summary.id === sessionId);
   return {

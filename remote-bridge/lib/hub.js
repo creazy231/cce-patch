@@ -75,9 +75,9 @@ const USAGE_RESET_FLOOR_S = 1_704_067_200;
 const USAGE_RESET_AHEAD_S = 30 * 86_400;
 const USAGE_AT_AHEAD_MS = 60_000;
 // A reading's account (the signed-in email) is a non-empty string no longer than an email address can be, without
-// control characters.
+// control, bidi or invisible characters, which could make it show as another address (the app's rule for names).
 const USAGE_ACCOUNT_MAX = 254;
-const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+const INVISIBLE_CHAR_RE = /[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿]/;
 
 const CLOSE = {
   goingAway: 1001,
@@ -319,7 +319,7 @@ function usageView(reading, nowMs) {
   const at = reading.at;
   if (typeof at === 'number' && Number.isFinite(at) && at > 0 && at <= nowMs + USAGE_AT_AHEAD_MS) view.at = at;
   const account = reading.account;
-  if (typeof account === 'string' && account.length > 0 && account.length <= USAGE_ACCOUNT_MAX && !CONTROL_CHAR_RE.test(account)) view.account = account;
+  if (typeof account === 'string' && account.length > 0 && account.length <= USAGE_ACCOUNT_MAX && !INVISIBLE_CHAR_RE.test(account)) view.account = account;
   return view;
 }
 
