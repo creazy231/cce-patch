@@ -32,6 +32,8 @@ The result shows in VS Code and on the phone.
 
   Names are written as VS Code writes them, including its plugin-prefixed name when two commands share a name.
 - **Demo mode** (`?demo`) shows a sample list, and tapping a command there works like sending a message.
+- **The built-ins VS Code shows its own UI for** (`/context`, `/usage`, `/model`, `/mcp`, `/config`, `/settings`) are listed and sent like the others. On the phone they run in Claude Code, which answers in text on both screens, where VS Code would open a dialog on the Mac. They are Claude Code's own commands (choice 1), and a dialog on the Mac couldn't be seen from the phone.
+- **After `/clear`, `/reset` or `/new`** is sent from the phone, the phone follows Claude Code into the new session, as the VS Code tab does.
 
 ## Non-goals
 
@@ -41,6 +43,7 @@ The result shows in VS Code and on the phone.
 - **An argument form.** Arguments are typed after the name, as in VS Code.
 - **Command history, favourites, or sorting by use.**
 - **A new protocol version.**
+- **Keeping VS Code's pickers in step.** A model, effort or setting changed by a command from the phone applies to the running session, but VS Code's pickers don't show it, and a new session starts from VS Code's settings. The README says so.
 
 ## Anti-goals
 
@@ -61,7 +64,10 @@ The result shows in VS Code and on the phone.
   - The entries VS Code handles itself are registered separately by the chat view. They are not in `commands`.
 - **What a pick does.**
   - A click or Enter calls `submit("/<invocation>")`, the chat view's normal submit. Tab only completes.
-  - Exceptions: `/usage` and `/context` open VS Code dialogs, but only when the list lacks them.
+  - Exceptions: VS Code keeps the set `mcp, config, settings, model, usage, context` (`kLn`), Claude Code built-ins that it shows its own UI for. `/usage` (aliases `/cost`, `/stats`) and `/context` open VS Code dialogs whenever the listed command is the built-in one. `/model`, `/mcp`, `/config` and `/settings` sent without arguments open VS Code's pickers. Only with arguments, or when a user command has that name, do they reach Claude Code. (Corrected after the builder check.)
+- **MCP commands** are listed as `server:prompt (MCP)`, with a space. Claude Code reads `/server:prompt (MCP) args` as the command `server:prompt (MCP)` followed by arguments (`Ww`).
+- **`/clear`** (aliases `/reset`, `/new`) is in the list. It starts a new session with empty context in the same Claude Code process, and VS Code doesn't intercept it. The tab, and the bridge's map from channel to session (from the next `system/init`), move to the new session id. The old session keeps no channel. A live session without a transcript is listed in the window's project as "New session".
+- **Settings changed by a command.** After a command it sent itself, VS Code reads the model and effort again. It doesn't do that for a phone message, which skips the webview: Claude Code changes, but VS Code's pickers keep the old value. A new session starts from VS Code's value.
 - **The list is per window, held by each webview's comms on the host:**
   - `config`: a promise of the window's config;
   - `settledConfig`: the resolved config;
@@ -135,7 +141,7 @@ The agent then maps the entries:
 - **Hub routing.** The hub routes `commands` like the other acked actions: `actionCall` gives `{method:'commands', args:{}}`, and `_onFrame` sends it to `_onAction`.
 - **Hub checks.** The ack carries the hub's checked copy of the result:
   - at most 300 commands;
-  - `name`: 1–100 characters, no whitespace, no control, bidi or invisible characters, no duplicates;
+  - `name`: 1–100 characters, no control, bidi or invisible characters, no duplicates; no whitespace, except one trailing ` (MCP)` (MCP commands);
   - `description`: cut to 300 characters, on one line;
   - `argumentHint` and `plugin`: at most 100 characters;
   - `aliases`: at most 10, each with the same rules as a name;
@@ -151,6 +157,10 @@ The agent then maps the entries:
   - **Fetching.** It fetches when a session or the "New session" screen opens, and when `/` is typed and the copy is missing or older than about 60 s. A refetch keeps showing the old list.
   - **Unsupported.** `unknown_type` or `unknown_method` marks the window unsupported until the next welcome, so the app doesn't ask on every keystroke.
   - **Reconnects.** A reconnect (welcome) marks every entry stale.
+- **Store: following `/clear`.**
+  - **When.** A send whose whole text is `/clear`, `/reset` or `/new` makes the store remember the window's session ids at that moment.
+  - **What happens.** When the window's list next shows a session that wasn't there, within 30 s, the store opens it in place of the old one (replace navigation) and toasts "Continuing in the new session".
+  - **Why it's safe.** If no new session appears (a user command with one of those names, say), nothing happens. Leaving the screen ends the watch.
 - **Composer: the list.**
   - **When it shows.** The list shows while the field is focused and its whole text is a slash followed by a name being typed: `^/\S*$`. Typing a space, clearing the field or leaving it closes the list. After a space, Send sends the text as typed (`/name args`).
   - **Position.** It sits directly above the field, inside the dock. It shows about five rows and scrolls beyond that.
@@ -198,6 +208,11 @@ The Mac side needs `bun run patch.ts`, then a reload of every VS Code window. Wi
 - **Origin:** phone messages carry `origin:{kind:"human"}`, as VS Code's typed messages do. This makes plugin-provided local commands work.
 - **Notes in place of the list:** a short note for an old Mac, an empty window, and a failed fetch.
 - **Bounds:** 300 commands, 300-character descriptions.
+- **After the builder check** (the user was away and asked for every decision to be made on their behalf):
+  - **The built-ins VS Code shows its own UI for** (`/context`, `/usage`, `/model`, `/mcp`, `/config`, `/settings`) are listed and sent as text. Claude Code answers on both screens. Hiding them would drop useful commands, and a dialog on the Mac can't be seen from the phone.
+  - **`/clear`, `/reset` and `/new`:** the phone follows the new session through the window's list, with no protocol change. The cost: another session started in that window within 30 s could be opened instead.
+  - **VS Code's pickers aren't kept in step** after a setting changed from the phone. The README says so.
+  - **MCP command names** may end in ` (MCP)`.
 
 ## Left to the builder
 

@@ -17,7 +17,7 @@
 - **Protocol stays version 1,** backwards compatible. An old hub answers `unknown_type`, an old peer window `unknown_method`.
 - **Hub bounds on `commands`:**
   - at most 300 entries;
-  - `name`: 1–100 characters, no whitespace, no characters matching hub.js's `INVISIBLE_CHAR_RE`, unique;
+  - `name`: 1–100 characters, no characters matching hub.js's `INVISIBLE_CHAR_RE`, unique; no whitespace, except one trailing ` (MCP)` (MCP commands are named `server:prompt (MCP)`);
   - `description`: one line (whitespace runs become one space), control, bidi and invisible characters removed, cut to 300 characters;
   - `argumentHint` and `plugin`: the same treatment, cut to 100 characters;
   - `aliases`: at most 10, each with the name rule;
@@ -140,6 +140,7 @@
     - a duplicate of the first name.
 
     Also: a description of 500 characters comes back as 300; `aliases` of 12 valid entries come back as 10; an alias `"a b"` is dropped; `argumentHint:"[x]​"` comes back `"[x]"`; `commands.length === 300`.
+  - `"commands: MCP command names keep their trailing (MCP)"`: `{name:"github:create-issue (MCP)", argumentHint:"[title]"}` is kept as is; `{name:"a (MCP) b"}` and `{name:"x  (MCP)"}` are dropped.
   - `"commands: a window answer that is not a list acks []"`: the window answers `undefined` → `commands: []`.
   - Extend the existing `DEFAULT_CALL_TIMEOUTS_MS` assertion with `commands: 15_000`.
   - In coordinator.test.ts, `"callAgent('commands') returns agent.commands()"`: a stub agent with `commands: async () => [{name:"x"}]` → `[{name:"x"}]`. Use the file's existing pattern for calling a window through the coordinator; if callAgent isn't reachable, assert through the hub's window call as the other methods' tests do.
@@ -209,7 +210,13 @@
 
     Sort by score, then `a.name.localeCompare(b.name)`. For `""` everything scores 0.
   - `RemoteClient#commands` is `this.request((id) => ({t:"commands", id, project}), COMMANDS_ACK_TIMEOUT_MS)`.
-  - `DEMO_COMMANDS` has 8 entries: `compact`, `context`, `init`, `review` (argumentHint `"[pr number]"`), `release-notes`, a user command `fix-issue` (argumentHint `"[issue]"`), a skill `brainstorming`, and a plugin command `ops:deploy` (plugin `"ops"`, argumentHint `"[env]"`).
+  - `DEMO_COMMANDS` has 9 entries:
+    - `clear` (aliases `["reset", "new"]`), `compact`, `context`, `init`;
+    - `review` (argumentHint `"[pr number]"`);
+    - a user command `fix-issue` (argumentHint `"[issue]"`);
+    - a skill `brainstorming`;
+    - a plugin command `ops:deploy` (plugin `"ops"`, argumentHint `"[env]"`);
+    - an MCP command `github:create-issue (MCP)` (argumentHint `"[title]"`).
   - `DemoSource#commands` resolves after about 150 ms with `{t:"ack", id, ok:true, commands: DEMO_COMMANDS}`, or rejects `not_connected` like `simpleAck`.
 
 - [ ] **Step 4: Run them to see them pass, plus the type check.** `cd remote-app && bun test test && npx tsc --noEmit`. Expected: PASS. The type check covers the store's `FakeSource` in store.test.ts, which now needs `commands`: add `commands(...args) { return this.deferred("commands", args); }`.
@@ -254,7 +261,24 @@
 
 - [ ] **Step 4: Run the app suite.** `cd remote-app && bun test test && npx tsc --noEmit`. Expected: PASS.
 
-- [ ] **Step 5: Commit.** `git add remote-app/src/state/store.ts remote-app/test/store.test.ts && git commit -m "🔧 Keep each window's slash commands on the phone"`
+- [ ] **Step 5: Following `/clear` (design: "Store: following /clear").** First the failing tests, in `describe("following /clear", …)`:
+  - `"after /clear the screen moves to the session Claude Code started"`:
+    1. Open `s1` in `p1`, whose sessions are `[s1]`.
+    2. `store.send("/clear", [])`; the send acks.
+    3. Emit `projects` with `p1` sessions `[s1, s9]`.
+    4. The view's session is `s9`, the route is `{name:"session", project:"p1", session:"s9"}`, and a toast says "Continuing in the new session".
+  - `"/reset and /new too, but not /clear with arguments or other text"`. `/reset` and `/new` behave the same. `"/clear now"` and `"clear"` start no watch: a new session appearing changes nothing.
+  - `"no new session within 30 s: nothing happens"`. Move `now` past 30 s, then emit projects with a new session: the view stays on `s1`.
+  - `"leaving the screen ends the watch"`. Go back home, then emit projects with a new session: no navigation.
+
+  Implement:
+  - A private `following: {key: number; project: string; known: Set<string>; until: number} | null`, set after a successful send of `/clear`, `/reset` or `/new` (the text trimmed, an exact match).
+  - On each `projects` update, when `following` matches the current view's key and `now() < until`, the newest session not in `known` is opened with the existing open-session path in replace mode, followed by the toast.
+  - Cleared when it fires, when it times out, and when the view changes.
+
+  Run: `cd remote-app && bun test test/store.test.ts -t "following /clear"`. Expected: FAIL first, then PASS.
+
+- [ ] **Step 6: Commit.** `git add remote-app/src/state/store.ts remote-app/test/store.test.ts && git commit -m "🔧 Keep each window's slash commands on the phone and follow /clear"`
 
 ### Task 6: App — the list in the message field
 
@@ -337,7 +361,11 @@
 
 - [ ] **Step 1: Write the docs.**
   - The protocol line: `{t:"commands", id, project} → {t:"ack", id, ok, error?, commands?:[{name, description?, argumentHint?, aliases?, plugin?}]}`.
-  - The paragraph says where the list comes from, the bounds, and the old-hub and old-peer answers.
+  - The paragraph says where the list comes from, the bounds (with the ` (MCP)` exception), and the old-hub and old-peer answers.
+  - The app README and the repo README say:
+    - the six built-ins VS Code shows its own UI for answer in text on the phone;
+    - a model, effort or setting changed from the phone doesn't show in VS Code's pickers, and new sessions start from VS Code's settings;
+    - the phone follows `/clear` into the new session.
 
 - [ ] **Step 2: Dry-run the patch in the sandbox.** As in CLAUDE.md, run `HOME=<scratch> bun run patch.ts --no-commit-button` against copies of the installed extension. Expected: every verify line `ok`, and `cce-remote/lib/commands.js` among the copied files.
 
@@ -345,7 +373,7 @@
   1. Open one Claude panel there.
   2. Through the extension host's inspector, reach the window agent: find how bridge.js keeps it (read bridge.js), via `require.cache` or a module global.
   3. Check that `await agent.commands()` contains `context` and `hello`, plus the user's skills.
-  4. Run `agent.send(<the panel's session>, "/context")` and then `"/hello"`. In the webview DOM (CDP), check that the context output and "pong" show in the VS Code session.
+  4. Run `agent.send(<the panel's session>, "/context")` and then `"/hello"`. In the webview DOM (CDP), check that the context output and "pong" show in the VS Code session. Then `agent.send(<session>, "/clear")`, and check that the agent's project lists a new session while the old one keeps no channel. That is the behaviour the app's follow relies on.
   5. Stop the instance by its PID (never by app name).
 
   Remote access stays off, and nothing touches Tailscale. If the isolated run can't be brought up, record why, and rely on the bundle facts in the design.
