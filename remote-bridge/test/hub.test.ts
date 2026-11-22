@@ -1533,8 +1533,66 @@ describe("requests", () => {
     expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "r2", ok: false, error: "bad_images" });
   });
 
-  test("window calls time out per method: send 50 s (a new session can take 40 s), active 10 s, the rest 20 s", () => {
-    expect(DEFAULT_CALL_TIMEOUTS_MS).toEqual({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000 });
+  test("window calls time out per method: send 50 s (a new session can take 40 s), active 10 s, commands 15 s, the rest 20 s", () => {
+    expect(DEFAULT_CALL_TIMEOUTS_MS).toEqual({
+      snapshot: 20_000,
+      send: 50_000,
+      answer: 20_000,
+      interrupt: 20_000,
+      open: 20_000,
+      openClaude: 20_000,
+      active: 10_000,
+      usage: 20_000,
+      commands: 15_000,
+    });
+  });
+
+  test("commands: routed to the window, acked with the checked list", async () => {
+    const ctx = await startHub();
+    const w = fakeWindow(ctx.hub, { handlers: { commands: () => [{ name: "compact", description: "Compact the\nconversation" }] } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send({ t: "commands", id: "r1", project: ID });
+    expect(await w.calls.next()).toEqual({ method: "commands", args: {} });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "r1", ok: true, commands: [{ name: "compact", description: "Compact the conversation" }] });
+  });
+
+  test("commands: the hub bounds what a window answers", async () => {
+    const ctx = await startHub();
+    const names = Array.from({ length: 400 }, (_, i) => `c${String(i).padStart(3, "0")}`);
+    const first = { name: "c000", description: "d".repeat(500), argumentHint: "[x]​", aliases: ["a b", ...Array.from({ length: 12 }, (_, i) => `al${i}`)] };
+    const answer = [
+      { name: "has space" },
+      { name: "" },
+      { name: "x".repeat(101) },
+      { name: "bad‮name" },
+      first,
+      { name: "c000", description: "a second c000" },
+      ...names.slice(1).map((name) => ({ name })),
+    ];
+    fakeWindow(ctx.hub, { handlers: { commands: () => answer } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send({ t: "commands", id: "r1", project: ID });
+    const ack = await nextFrame(phone, "ack");
+    expect(ack.ok).toBe(true);
+    expect(ack.commands).toHaveLength(300);
+    expect(ack.commands[0]).toEqual({ name: "c000", description: "d".repeat(300), argumentHint: "[x]", aliases: ["al0", "al1", "al2", "al3", "al4", "al5", "al6", "al7", "al8", "al9"] });
+    expect(ack.commands.map((c: { name: string }) => c.name)).toEqual(names.slice(0, 300));
+  });
+
+  test("commands: MCP command names keep their trailing (MCP)", async () => {
+    const ctx = await startHub();
+    fakeWindow(ctx.hub, { handlers: { commands: () => [{ name: "github:create-issue (MCP)", argumentHint: "[title]" }, { name: "a (MCP) b" }, { name: "x  (MCP)" }] } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send({ t: "commands", id: "r1", project: ID });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "r1", ok: true, commands: [{ name: "github:create-issue (MCP)", argumentHint: "[title]" }] });
+  });
+
+  test("commands: a window answer that is not a list acks []", async () => {
+    const ctx = await startHub();
+    fakeWindow(ctx.hub, { handlers: { commands: () => undefined } });
+    const { phone } = await pairedPhone(ctx);
+    phone.send({ t: "commands", id: "r1", project: ID });
+    expect(await nextFrame(phone, "ack")).toEqual({ t: "ack", id: "r1", ok: true, commands: [] });
   });
 
   test("callTimeoutMs can set the timeout of one method", async () => {
@@ -1578,6 +1636,7 @@ describe("requests", () => {
     ["interrupt with a session that is not a string", { t: "interrupt", id: "r1", project: ID, session: 5 }],
     ["open with an empty session", { t: "open", id: "r1", project: ID, session: "" }],
     ["openClaude without a project", { t: "openClaude", id: "r1" }],
+    ["commands without a project", { t: "commands", id: "r1" }],
     ["a project id that is far too long", { t: "openClaude", id: "r1", project: "p".repeat(300) }],
   ])("%s: ack bad_request, and no window is called", async (_label, frame) => {
     const ctx = await startHub();

@@ -249,6 +249,10 @@ async function callAgent(agent, method, args) {
       return undefined;
     case 'usage':
       return await agent.refreshUsage();
+    case 'commands':
+      // An agent without it is an older window's: it answers as one would.
+      if (typeof agent.commands !== 'function') throw codeError('unknown_method');
+      return await agent.commands();
     default:
       throw codeError('unknown_method');
   }

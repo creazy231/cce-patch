@@ -64,7 +64,7 @@ const DNS_NAME_RE = /^[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})*$/;
  * (up to 20 s for the editor tab's channel, up to 20 s for the session's name); the app waits 60 s.
  * @type {Readonly<Record<string, number>>}
  */
-const DEFAULT_CALL_TIMEOUTS_MS = Object.freeze({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000 });
+const DEFAULT_CALL_TIMEOUTS_MS = Object.freeze({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000, commands: 15_000 });
 const FALLBACK_CALL_TIMEOUT_MS = 20_000;
 const PEER_CALL_TIMEOUT_MS = 60_000; // the hub's own timeout per call decides first
 const DISABLED_MESSAGE = 'Remote access was turned off on the Mac';
@@ -78,6 +78,12 @@ const USAGE_AT_AHEAD_MS = 60_000;
 // control, bidi or invisible characters, which could make it show as another address (the app's rule for names).
 const USAGE_ACCOUNT_MAX = 254;
 const INVISIBLE_CHAR_RE = /[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿]/;
+const INVISIBLE_CHARS_RE = new RegExp(INVISIBLE_CHAR_RE.source, 'g');
+// A window's slash commands as phones get them (the `commands` request): at most 300, each name at most 100 characters
+// and without whitespace except the one trailing " (MCP)" Claude Code gives an MCP server's prompts, the texts on one
+// line and cut.
+const COMMAND_LIMITS = Object.freeze({ count: 300, name: 100, description: 300, argumentHint: 100, plugin: 100, aliases: 10 });
+const COMMAND_NAME_RE = /^\S+(?: \(MCP\))?$/;
 
 const CLOSE = {
   goingAway: 1001,
@@ -323,11 +329,62 @@ function usageView(reading, nowMs) {
   return view;
 }
 
+/** A command's name, when it is one: see COMMAND_LIMITS. @param {unknown} value @returns {string | undefined} */
+function commandName(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > COMMAND_LIMITS.name) return undefined;
+  return COMMAND_NAME_RE.test(value) && !INVISIBLE_CHAR_RE.test(value) ? value : undefined;
+}
+
+/**
+ * A command's text on one line: whitespace runs become one space, control, bidi and invisible characters go, cut to
+ * `max`. Undefined when nothing is left. (Whitespace first: a newline is a control character too.)
+ * @param {unknown} value @param {number} max @returns {string | undefined}
+ */
+function commandText(value, max) {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/\s+/g, ' ').replace(INVISIBLE_CHARS_RE, '').replace(/ {2,}/g, ' ').trim().slice(0, max).trimEnd();
+  return text === '' ? undefined : text;
+}
+
+/**
+ * A window's answer to `commands`, as phones get it: the first 300 well-named commands, a name only once, with their
+ * description, argument hint, aliases (at most 10, each well named) and plugin when those have text; anything else
+ * is left out, and an answer that is not a list is [].
+ * @param {unknown} value
+ * @returns {Array<{ name: string, description?: string, argumentHint?: string, aliases?: string[], plugin?: string }>}
+ */
+function checkSlashCommands(value) {
+  if (!Array.isArray(value)) return [];
+  /** @type {Array<{ name: string, description?: string, argumentHint?: string, aliases?: string[], plugin?: string }>} */
+  const out = [];
+  /** @type {Set<string>} */
+  const seen = new Set();
+  for (const entry of value) {
+    if (out.length >= COMMAND_LIMITS.count) break;
+    if (!isRecord(entry)) continue;
+    const name = commandName(entry.name);
+    if (name === undefined || seen.has(name)) continue;
+    seen.add(name);
+    /** @type {{ name: string, description?: string, argumentHint?: string, aliases?: string[], plugin?: string }} */
+    const command = { name };
+    const description = commandText(entry.description, COMMAND_LIMITS.description);
+    if (description !== undefined) command.description = description;
+    const argumentHint = commandText(entry.argumentHint, COMMAND_LIMITS.argumentHint);
+    if (argumentHint !== undefined) command.argumentHint = argumentHint;
+    const aliases = Array.isArray(entry.aliases) ? [...new Set(entry.aliases.map(commandName).filter((alias) => alias !== undefined))].slice(0, COMMAND_LIMITS.aliases) : [];
+    if (aliases.length > 0) command.aliases = /** @type {string[]} */ (aliases);
+    const plugin = commandText(entry.plugin, COMMAND_LIMITS.plugin);
+    if (plugin !== undefined) command.plugin = plugin;
+    out.push(command);
+  }
+  return out;
+}
+
 /**
  * Which window call a phone request is, with its arguments; null when the request is not well
  * formed. The arguments are what the window agent takes (the Task 8 adapter maps them):
  * send {session|null, text, images}, answer {session, requestId, choice}, interrupt/open {session},
- * openClaude {}.
+ * openClaude {}, commands {} (the window's slash commands).
  * @param {Record<string, any>} frame
  * @returns {{ method: string, args: Record<string, any> } | null}
  */
@@ -351,6 +408,8 @@ function actionCall(frame) {
       return { method: frame.t, args: { session } };
     case 'openClaude':
       return { method: 'openClaude', args: {} };
+    case 'commands':
+      return { method: 'commands', args: {} };
     default:
       return null;
   }
@@ -431,7 +490,7 @@ class Hub extends EventEmitter {
    *   projectsDebounceMs: project changes within this time make one `projects` frame;
    *   idleTimeoutMs: a phone that sends nothing (the app pings every 25 s) is closed after this;
    *   callTimeoutMs: how long a window call may take: one number for every method, or some methods'
-   *     own (the rest keep DEFAULT_CALL_TIMEOUTS_MS: send 50 s, active 10 s, the others 20 s);
+   *     own (the rest keep DEFAULT_CALL_TIMEOUTS_MS: send 50 s, active 10 s, commands 15 s, the others 20 s);
    *   peerAuthTimeoutMs: how long a peer link has to prove that it knows the secret (5 s);
    *   notifier: what tests inject into the notifier (send, idleSeconds, sendOptions, limits).
    */
@@ -1165,6 +1224,7 @@ class Hub extends EventEmitter {
       case 'interrupt':
       case 'open':
       case 'openClaude':
+      case 'commands':
         return this._onAction(phone, frame);
       case 'pair':
       case 'hello':
@@ -1462,6 +1522,7 @@ class Hub extends EventEmitter {
           if (typeof result.session === 'string') fields.session = result.session; // null: a new session not named yet
           if (typeof result.uuid === 'string') fields.uuid = result.uuid;
         }
+        if (call.method === 'commands') fields.commands = checkSlashCommands(result);
         ack(fields);
       },
       (error) => ack({ ok: false, error: errorText(error) }),

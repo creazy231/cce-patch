@@ -561,7 +561,7 @@ describe("election", () => {
       tailscale.served.add(port); // on from before
       const window = makeCoordinator(env, { tailscale, retryMs: [10, 20], errorRetryMs: [100, 150] });
       const agentCalls: string[] = [];
-      for (const method of ["snapshot", "send", "answer", "interrupt", "open", "openClaude", "setActive"] as const) {
+      for (const method of ["snapshot", "send", "answer", "interrupt", "open", "openClaude", "setActive", "commands"] as const) {
         const original = (window.agent as any)[method].bind(window.agent);
         (window.agent as any)[method] = (...args: unknown[]) => {
           agentCalls.push(method);
@@ -1453,6 +1453,15 @@ describe("usage", () => {
     const answer = { refreshed: true, reading: { supported: true } };
     const agent = { refreshUsage: async () => answer };
     expect(await callAgent(agent, "usage", {})).toEqual(answer);
+  });
+
+  test("callAgent('commands') returns agent.commands()", async () => {
+    const agent = { commands: async () => [{ name: "x" }] };
+    expect(await callAgent(agent, "commands", {})).toEqual([{ name: "x" }]);
+  });
+
+  test("commands to a window whose agent lacks it: unknown_method, as an older window answers", async () => {
+    await expect(callAgent({}, "commands", {})).rejects.toThrow("unknown_method");
   });
 
   test("readings from the hub's own window and from a peer reach the hub", async () => {
