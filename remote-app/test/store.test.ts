@@ -139,6 +139,9 @@ class FakeSource implements Source {
   openClaude(...args: unknown[]) {
     return this.deferred("openClaude", args);
   }
+  commands(...args: unknown[]) {
+    return this.deferred("commands", args);
+  }
   pushSet(...args: unknown[]) {
     return this.deferred("pushSet", args);
   }

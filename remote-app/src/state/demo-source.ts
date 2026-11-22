@@ -4,7 +4,7 @@
 // Nothing leaves the page.
 
 import { RemoteError, type ClientEvents, type ClientState } from "../lib/client";
-import { demoProjects, demoSnapshot, demoUsage } from "../lib/demo";
+import { DEMO_COMMANDS, demoProjects, demoSnapshot, demoUsage } from "../lib/demo";
 import type { Ack, Choice, ContentBlock, ImageUpload, Pending, PhoneMessage, Project, SessionState, StreamEvent } from "../lib/protocol";
 import type { PushSetup } from "../lib/push";
 import type { Source } from "./source";
@@ -228,6 +228,14 @@ export class DemoSource implements Source {
       () => undefined,
     );
     return ack;
+  }
+
+  /** Every demo window has the same slash commands. */
+  commands(_project: string): Promise<Ack> {
+    if (this.current !== "open") return Promise.reject(new RemoteError("not_connected"));
+    return new Promise((resolve) =>
+      this.later(() => resolve({ t: "ack", id: `demo-${++this.seq}`, ok: true, commands: DEMO_COMMANDS.map((c) => ({ ...c })) }), 150),
+    );
   }
 
   // The demo has no Mac to notify anyone: every push request answers "demo".

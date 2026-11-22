@@ -104,6 +104,27 @@ describe("demo data (?demo)", () => {
   });
 });
 
+describe("DemoSource: slash commands", () => {
+  test("the demo lists commands, with argument hints, a plugin's and an MCP server's", async () => {
+    const source = new DemoSource({ speed: 0, liveStream: false });
+    source.connect();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const ack = await source.commands(demoProjects[0]!.id);
+    expect(ack.ok).toBe(true);
+    const names = (ack.commands ?? []).map((c) => c.name);
+    expect(names).toContain("compact");
+    expect(names).toContain("github:create-issue (MCP)");
+    expect(ack.commands!.some((c) => c.argumentHint)).toBe(true);
+    expect(ack.commands!.some((c) => c.plugin)).toBe(true);
+    source.close();
+  });
+
+  test("not connected: not_connected, as with a Mac", async () => {
+    const source = new DemoSource({ speed: 0, liveStream: false });
+    await expect(source.commands(demoProjects[0]!.id)).rejects.toMatchObject({ code: "not_connected" });
+  });
+});
+
 describe("DemoSource: usage", () => {
   const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 

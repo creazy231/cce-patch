@@ -758,6 +758,32 @@ describe("RemoteClient: requests", () => {
     expect((result.error as RemoteError).code).toBe("failed");
   });
 
+  test("commands sends its frame and resolves on the ack, with the window's list", async () => {
+    const { client } = setup();
+    client.connect();
+    handshake();
+    const result = track(client.commands("p1"));
+    const frame = last().sent.at(-1)!;
+    expect(frame).toEqual({ t: "commands", id: expect.any(String), project: "p1" });
+    last().receive({ t: "ack", id: frame.id, ok: true, commands: [{ name: "compact" }] });
+    await flush();
+    expect(result).toEqual({ state: "resolved", value: { t: "ack", id: frame.id, ok: true, commands: [{ name: "compact" }] } });
+  });
+
+  test("commands gives up after 20 s, past the Mac's own 15 s for the window", async () => {
+    const { client, timers } = setup();
+    client.connect();
+    handshake();
+    const result = track(client.commands("p1"));
+    timers.advance(19_999);
+    await flush();
+    expect(result.state).toBe("pending");
+    timers.advance(1);
+    await flush();
+    expect(result.state).toBe("rejected");
+    expect((result.error as RemoteError).code).toBe("timeout");
+  });
+
   test("an ack that never comes rejects with 'timeout' after 30 s", async () => {
     const { client, timers } = setup();
     client.connect();

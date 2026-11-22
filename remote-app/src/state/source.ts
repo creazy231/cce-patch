@@ -20,6 +20,8 @@ export interface Source {
   interrupt(project: string, session: string): Promise<Ack>;
   open(project: string, session: string): Promise<Ack>;
   openClaude(project: string): Promise<Ack>;
+  /** The window's slash commands, in the ack's `commands`. */
+  commands(project: string): Promise<Ack>;
   pushSet(setup: PushSetup): Promise<Ack>;
   pushClear(): Promise<Ack>;
   pushTest(): Promise<Ack>;

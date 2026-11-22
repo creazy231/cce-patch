@@ -116,6 +116,22 @@ export type Choice =
   | { kind: "keepPlanning"; feedback?: string }
   | { kind: "cancel" };
 
+// ---- slash commands -----------------------------------------------------------------------------
+
+/**
+ * One of a window's slash commands: the Claude Code commands VS Code's `/` menu lists for it. `name` is what goes
+ * after the `/` (a plugin's command may be `plugin:name`, an MCP server's prompt `server:prompt (MCP)`).
+ */
+export interface SlashCommand {
+  name: string;
+  description?: string;
+  /** What the command takes after its name, e.g. "[pr number]". */
+  argumentHint?: string;
+  aliases?: string[];
+  /** The plugin it comes from. */
+  plugin?: string;
+}
+
 // ---- frames -------------------------------------------------------------------------------------
 
 export interface ImageUpload {
@@ -140,9 +156,10 @@ export type ClientMsg =
   | { t: "push_test"; id: string }
   | { t: "visibility"; visible: boolean }
   | { t: "usage_refresh" }
+  | { t: "commands"; id: string; project: string }
   | { t: "ping" };
 
-/** The answer to `send`, `answer`, `interrupt`, `open`, `openClaude` and the push requests. */
+/** The answer to `send`, `answer`, `interrupt`, `open`, `openClaude`, `commands` and the push requests. */
 export interface Ack {
   t: "ack";
   id: string;
@@ -156,6 +173,8 @@ export interface Ack {
   session?: string;
   /** send: the uuid of the user message the bridge injected; the CLI replays it with `isReplay`. */
   uuid?: string;
+  /** commands: the window's slash commands (an older Mac answers `unknown_type` instead). */
+  commands?: SlashCommand[];
 }
 
 export interface PairedFrame {

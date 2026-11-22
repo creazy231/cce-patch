@@ -1,7 +1,7 @@
 // Built-in fixture data for `?demo`: screenshots and UI tests without a Mac or a network.
 // Everything here is fictional (projects "acme-api", "acme-web", "docs-site").
 
-import type { ContentBlock, Pending, PhoneMessage, Project, SessionSummary, SnapshotFrame, UsageFrame } from "./protocol";
+import type { ContentBlock, Pending, PhoneMessage, Project, SessionSummary, SlashCommand, SnapshotFrame, UsageFrame } from "./protocol";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -469,6 +469,22 @@ export function demoUsage(at: number): UsageFrame {
     account: "you@example.com",
   };
 }
+
+/**
+ * The demo's slash commands, as a window lists them: Claude Code built-ins, a user command, a skill, a plugin's
+ * command and an MCP server's prompt.
+ */
+export const DEMO_COMMANDS: SlashCommand[] = [
+  { name: "brainstorming", description: "Explore what to build before writing code" },
+  { name: "clear", description: "Clear the conversation and start a new session", aliases: ["reset", "new"] },
+  { name: "compact", description: "Clear the conversation but keep a summary in context" },
+  { name: "context", description: "Show how much of the context window is used" },
+  { name: "fix-issue", description: "Fix a GitHub issue end to end", argumentHint: "[issue]" },
+  { name: "github:create-issue (MCP)", description: "Create an issue in the current repository", argumentHint: "[title]" },
+  { name: "init", description: "Write a CLAUDE.md with notes about this codebase" },
+  { name: "ops:deploy", description: "Deploy the current branch", argumentHint: "[env]", plugin: "ops" },
+  { name: "review", description: "Review a pull request", argumentHint: "[pr number]" },
+];
 
 /** What the Mac sends after `sub` for a demo session; an unknown id gives an empty, idle session. */
 export function demoSnapshot(sessionId: string): SnapshotFrame {

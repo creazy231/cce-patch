@@ -117,6 +117,8 @@ const PROBE_WITHIN_MS = 4_000;
 const ACK_TIMEOUT_MS = 30_000;
 /** Starting a session waits on the Mac for VS Code's new tab and then for the session's name: up to ~40 s. */
 const NEW_SESSION_ACK_TIMEOUT_MS = 60_000;
+/** A window's slash commands: the Mac gives the window 15 s, the phone a little more. */
+const COMMANDS_ACK_TIMEOUT_MS = 20_000;
 const PAIR_TIMEOUT_MS = 15_000;
 /**
  * The Mac's refusals of this phone itself: unknown or wrong token, paired from another app address, removed
@@ -301,6 +303,11 @@ export class RemoteClient {
   /** Opens Claude Code's panel in that project's window. */
   openClaude(project: string): Promise<Ack> {
     return this.request((id) => ({ t: "openClaude", id, project }));
+  }
+
+  /** Asks the window for its slash commands (the ack's `commands`; an older Mac answers `unknown_type`). */
+  commands(project: string): Promise<Ack> {
+    return this.request((id) => ({ t: "commands", id, project }), COMMANDS_ACK_TIMEOUT_MS);
   }
 
   /** Gives the Mac this phone's push subscription, VAPID keys, app origin and notification prefs. */
