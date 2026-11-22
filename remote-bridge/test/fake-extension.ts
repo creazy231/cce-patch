@@ -816,6 +816,18 @@ function promptText(prompt: Message): string {
     .join("\n");
 }
 
+/**
+ * The host's stored startup configs (its `storedStartupConfig`): `read(cwd)` gives the folder's own copy, or else the copy
+ * kept for any folder (2.1.330 keeps that one with `commands: []`), the way the host falls back when the folder's copy
+ * is missing, old or another login's.
+ */
+export function createStoredStartupConfig(
+  folders: Record<string, Record<string, any>> = {},
+  anyFolder: Record<string, any> | undefined = { models: [{ value: "default" }], commands: [] },
+): { read(cwd: string): Record<string, any> | undefined } {
+  return { read: (cwd: string) => folders[cwd] ?? anyFolder };
+}
+
 export function createFakeComms(options?: FakeCommsOptions): FakeComms {
   return new FakeComms(options);
 }

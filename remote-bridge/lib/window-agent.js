@@ -1564,7 +1564,8 @@ class WindowAgent extends EventEmitter {
 
   /**
    * The window's slash commands, as VS Code's `/` menu lists Claude Code's own (named by commands.js). They are read
-   * from what the extension already holds, the first list found in this order:
+   * from what the extension already holds, the first list that has commands in this order (an empty one is no list:
+   * the stored copy falls back to the one kept for any folder, which 2.1.330 keeps without commands):
    *  1. a comms' loaded config (`settledConfig`), the comms for the window's first folder first;
    *  2. the stored copy the webview shows while that loads (`storedStartupConfig.read(surfaceCwd())`);
    *  3. a running session's own list (`query.supportedCommands()`), the window's folder first;
@@ -1583,23 +1584,23 @@ class WindowAgent extends EventEmitter {
       const comms = homeFirst(this._commsList(), (c) => guard(() => c.configCwd));
       for (const c of comms) {
         const list = guard(() => c.settledConfig.commands);
-        if (Array.isArray(list)) return toSlashCommands(list);
+        if (Array.isArray(list) && list.length > 0) return toSlashCommands(list);
       }
       for (const c of comms) {
         const list = guard(() => (typeof c.storedStartupConfig.read === 'function' && typeof c.surfaceCwd === 'function' ? c.storedStartupConfig.read(c.surfaceCwd()).commands : undefined));
-        if (Array.isArray(list)) return toSlashCommands(list);
+        if (Array.isArray(list) && list.length > 0) return toSlashCommands(list);
       }
       const running = this._allChannels().filter((ref) => typeof guard(() => ref.channel.query.supportedCommands) === 'function');
       for (const ref of homeFirst(running, (r) => guard(() => r.channel.cwd))) {
         const list = await this._hostRead('the command list', () => ref.channel.query.supportedCommands()).catch(() => undefined);
-        if (Array.isArray(list)) return toSlashCommands(list);
+        if (Array.isArray(list) && list.length > 0) return toSlashCommands(list);
       }
       for (const c of comms) {
         const loading = guard(() => c.config);
         if (!loading || typeof loading.then !== 'function') continue;
         const config = await this._hostRead('the command list', () => loading).catch(() => undefined);
         const list = guard(() => config.commands);
-        if (Array.isArray(list)) return toSlashCommands(list);
+        if (Array.isArray(list) && list.length > 0) return toSlashCommands(list);
       }
     } catch (error) {
       this._failed(error);

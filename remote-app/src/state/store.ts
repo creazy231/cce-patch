@@ -614,17 +614,19 @@ export class Store {
 
   /**
    * Asks the window for its slash commands, unless that isn't needed: not connected, its Mac doesn't offer them
-   * (until the next welcome), a request is on its way, or the list is fresh (COMMANDS_FRESH_MS). A list it has stays
-   * on screen while a newer one is fetched, and when that fails.
+   * (until the next welcome), a request is on its way, or the list is fresh (COMMANDS_FRESH_MS; an empty one never
+   * is). A list it has stays on screen while a newer one is fetched, and when that fails.
    */
   loadCommands(project: string): void {
     const source = this.source;
     if (!source || this.state.conn !== "open" || this.commandsInFlight.has(project)) return;
     const entry = this.state.commands[project];
     if (entry?.status === "unsupported") return;
-    if (entry?.status === "ready" && entry.at > 0 && this.now() - entry.at < COMMANDS_FRESH_MS) return;
+    // An empty list is never fresh: a window with no Claude Code webview yet, or with one still loading, has none.
+    const hasList = entry?.status === "ready" && entry.list.length > 0;
+    if (hasList && entry.at > 0 && this.now() - entry.at < COMMANDS_FRESH_MS) return;
     this.commandsInFlight.add(project);
-    if (entry?.status !== "ready") this.setCommands(project, { status: "loading", list: [], at: 0 });
+    if (!hasList) this.setCommands(project, { status: "loading", list: [], at: 0 });
     const connection = this.connection;
     source.commands(project).then(
       (ack) => {

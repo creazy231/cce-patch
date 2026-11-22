@@ -1315,6 +1315,20 @@ describe("slash commands", () => {
     expect(store.state.commands.p1).toEqual({ status: "ready", list: [{ name: "a" }], at });
   });
 
+  test("an empty list is asked for again at the next look, showing it loads", async () => {
+    commandsStore();
+    store.loadCommands("p1");
+    fake.last("commands").resolve!(ack({ commands: [] }));
+    await flush();
+    expect(store.state.commands.p1).toEqual({ status: "ready", list: [], at: phoneNow });
+    store.loadCommands("p1"); // within 60 s: a window that had none (no Claude Code open yet) may have some now
+    expect(calls()).toHaveLength(2);
+    expect(store.state.commands.p1).toEqual({ status: "loading", list: [], at: 0 });
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    expect(store.state.commands.p1?.list).toEqual([{ name: "a" }]);
+  });
+
   test("one request at a time", () => {
     commandsStore();
     store.loadCommands("p1");

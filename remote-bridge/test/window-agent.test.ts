@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { classifyPending } from "../lib/answers.js";
 import { toPhoneMessage } from "../lib/transcript.js";
 import { AGENT_LIMITS, WindowAgent } from "../lib/window-agent.js";
-import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, wireUsage, type FakeAuthStatus, type FakeProvider, type Message } from "./fake-extension";
+import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, createStoredStartupConfig, wireUsage, type FakeAuthStatus, type FakeProvider, type Message } from "./fake-extension";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const MB = 1024 * 1024;
@@ -2181,6 +2181,21 @@ describe("commands", () => {
   test("no comms: []", async () => {
     expect(await new WindowAgent({ provider: { allComms: new Set() }, vscode: {} }).commands()).toEqual([]);
     expect(await new WindowAgent({}).commands()).toEqual([]);
+  });
+
+  test("the copy kept for any folder (always without commands) is no list: a running session's list wins", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.storedStartupConfig = createStoredStartupConfig(); // no copy for this folder: read() gives the any-folder copy
+    tab.channels.get("c2")!.query = { supportedCommands: async () => [{ name: "live" }] };
+    expect(await agent.commands()).toEqual([{ name: "live" }]);
+    noLoads(sidebar, tab);
+  });
+
+  test("an empty list is no list, from any source: the next one is asked", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.settledConfig = { commands: [] };
+    tab.config = Promise.resolve({ commands: [{ name: "pending" }] });
+    expect(await agent.commands()).toEqual([{ name: "pending" }]);
   });
 
   test("names as VS Code shows them: a shared name takes its plugin-prefixed alias", async () => {
