@@ -1278,3 +1278,194 @@ describe("usage", () => {
     expect(store.state.toasts).toEqual([]);
   });
 });
+
+describe("slash commands", () => {
+  let phoneNow = 1_000_000;
+  /** A store with this test's clock, connected, on the home screen. */
+  function commandsStore() {
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: true, createSource: () => fake, now: () => phoneNow });
+    store.start();
+  }
+  const calls = () => fake.calls.filter((c) => c.method === "commands");
+
+  test("the first load asks the Mac and keeps the list", async () => {
+    commandsStore();
+    store.loadCommands("p1");
+    expect(store.state.commands.p1).toEqual({ status: "loading", list: [], at: 0 });
+    expect(calls().map((c) => c.args)).toEqual([["p1"]]);
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    expect(store.state.commands.p1).toEqual({ status: "ready", list: [{ name: "a" }], at: phoneNow });
+  });
+
+  test("a fresh list is not asked again; an old one is, and stays on screen meanwhile", async () => {
+    commandsStore();
+    store.loadCommands("p1");
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    const at = phoneNow;
+    phoneNow += 59_999;
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(1);
+    phoneNow += 2;
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(2);
+    expect(store.state.commands.p1).toEqual({ status: "ready", list: [{ name: "a" }], at });
+  });
+
+  test("one request at a time", () => {
+    commandsStore();
+    store.loadCommands("p1");
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(1);
+  });
+
+  test("a failure without a list: failed; with one: the list stays", async () => {
+    commandsStore();
+    store.loadCommands("p1");
+    fake.last("commands").reject!(new RemoteError("timeout"));
+    await flush();
+    expect(store.state.commands.p1).toEqual({ status: "failed", list: [], at: 0 });
+    store.loadCommands("p1"); // a failed load is tried again
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    const at = phoneNow;
+    phoneNow += 61_000;
+    store.loadCommands("p1");
+    fake.last("commands").reject!(new RemoteError("timeout"));
+    await flush();
+    expect(store.state.commands.p1).toEqual({ status: "ready", list: [{ name: "a" }], at });
+  });
+
+  test.each(["unknown_type", "unknown_method"])("an old Mac (%s): unsupported, and not asked again until the next welcome", async (code) => {
+    commandsStore();
+    store.loadCommands("p1");
+    fake.last("commands").reject!(new RemoteError(code));
+    await flush();
+    expect(store.state.commands.p1).toEqual({ status: "unsupported", list: [], at: 0 });
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(1);
+    fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" } });
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(2);
+  });
+
+  test("a reconnect makes every list stale", async () => {
+    commandsStore();
+    store.loadCommands("p1");
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    fake.emit("welcome", { t: "welcome", v: 1, mac: { name: "example-mac" } });
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(2);
+    expect(store.state.commands.p1?.list).toEqual([{ name: "a" }]);
+  });
+
+  test("switching Macs forgets the lists, and a late answer from the old one is dropped", async () => {
+    saveMacs([MAC_A, MAC_B], localStorage);
+    selectMac(MAC_A.id, localStorage);
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: false, createSource: () => fake, pushEnv: fakePushEnv().env, now: () => phoneNow });
+    store.start();
+    store.loadCommands("p1");
+    fake.last("commands").resolve!(ack({ commands: [{ name: "a" }] }));
+    await flush();
+    store.loadCommands("p2");
+    const late = fake.last("commands");
+    store.switchMac(MAC_B.id);
+    expect(store.state.commands).toEqual({});
+    late.resolve!(ack({ commands: [{ name: "from Mac A" }] }));
+    await flush();
+    expect(store.state.commands).toEqual({});
+  });
+
+  test("not connected: nothing is asked", () => {
+    commandsStore();
+    fake.emit("state", "offline");
+    store.loadCommands("p1");
+    expect(calls()).toHaveLength(0);
+    expect(store.state.commands.p1).toBeUndefined();
+  });
+});
+
+describe("following /clear", () => {
+  let phoneNow = 1_000_000;
+  const summary = (id: string, lastModified = 1): SessionSummary => ({ id, title: id, lastModified, state: "idle", live: true, pendingCount: 0 });
+  const listing = (...ids: string[]) =>
+    fake.emit("projects", [{ id: PROJECT, name: "p", folders: [], editor: "VS Code", claudeOpen: true, sessions: ids.map((id, i) => summary(id, i + 1)) }]);
+  /** A store with this test's clock, on s1 of p1, which lists only s1. */
+  function onS1() {
+    store.stop();
+    history.replaceState(null, "", "/");
+    store = new Store({ demo: true, createSource: () => fake, now: () => phoneNow });
+    store.start();
+    listing(SESSION);
+    store.openSession(PROJECT, SESSION);
+    snapshot([said("m1", "first")]);
+  }
+  async function sendAndAck(text: string) {
+    const sending = store.send(text, []);
+    fake.last("send").resolve!(ack({ session: SESSION, uuid: `u-${text}` }));
+    await sending;
+  }
+
+  test("after /clear the screen moves to the session Claude Code started", async () => {
+    onS1();
+    await sendAndAck("/clear");
+    listing(SESSION, "s9");
+    expect(view().session).toBe("s9");
+    expect(store.state.route).toEqual({ name: "session", project: PROJECT, session: "s9" });
+    expect(store.state.toasts.map((t) => t.text)).toContain("Continuing in the new session");
+  });
+
+  test.each(["/reset", "/new", " /clear "])("%p too", async (text) => {
+    onS1();
+    await sendAndAck(text);
+    listing(SESSION, "s9");
+    expect(view().session).toBe("s9");
+  });
+
+  test.each(["/clear now", "clear", "/compact"])("%p: no follow, a new session changes nothing", async (text) => {
+    onS1();
+    await sendAndAck(text);
+    listing(SESSION, "s9");
+    expect(view().session).toBe(SESSION);
+  });
+
+  test("a session listed before the ack still counts", async () => {
+    onS1();
+    const sending = store.send("/clear", []);
+    listing(SESSION, "s9");
+    fake.last("send").resolve!(ack({ session: SESSION, uuid: "u-1" }));
+    await sending;
+    expect(view().session).toBe("s9");
+  });
+
+  test("no new session within 30 s: nothing happens", async () => {
+    onS1();
+    await sendAndAck("/clear");
+    phoneNow += 30_001;
+    listing(SESSION, "s9");
+    expect(view().session).toBe(SESSION);
+  });
+
+  test("leaving the screen ends the watch", async () => {
+    onS1();
+    await sendAndAck("/clear");
+    store.navigate({ name: "home" });
+    listing(SESSION, "s9");
+    expect(store.state.route).toEqual({ name: "home" });
+  });
+
+  test("a /clear that failed starts no watch", async () => {
+    onS1();
+    const sending = store.send("/clear", []);
+    fake.last("send").reject!(new RemoteError("not_running_in_vscode"));
+    await sending;
+    listing(SESSION, "s9");
+    expect(view().session).toBe(SESSION);
+  });
+});

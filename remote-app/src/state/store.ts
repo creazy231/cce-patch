@@ -33,11 +33,13 @@ import type {
   Project,
   SessionState,
   SessionSummary,
+  SlashCommand,
   SnapshotFrame,
   StreamFrame,
   UsageFrame,
   WelcomeFrame,
 } from "../lib/protocol";
+import { parseCommands } from "../lib/commands";
 import { EMPTY_STREAM, applyStreamEvent, streamAfterMessage, type LocalMessage, type StreamState } from "../lib/transcript";
 import { DEMO_MAC_ID, DEMO_MAC_NAME, DEMO_MAC_URL, DemoSource, type DemoOptions } from "./demo-source";
 import { cleanName, errorCode, errorMessage, errorText, hostOf, isUnconfirmed } from "./format";
@@ -128,6 +130,23 @@ export interface PushState {
   error: string | null;
 }
 
+/** How a window's slash commands stand on this phone: being fetched, here, not to be had, or not offered by its Mac. */
+export type CommandsStatus = "loading" | "ready" | "failed" | "unsupported";
+
+/** A window's slash commands as this phone holds them; `at` is when they came (this phone's clock), 0 when stale. */
+export interface CommandsEntry {
+  status: CommandsStatus;
+  list: SlashCommand[];
+  at: number;
+}
+
+/** How long a window's slash commands count as fresh; older ones are asked for again, and shown meanwhile. */
+export const COMMANDS_FRESH_MS = 60_000;
+/** How long after a /clear (or /reset, /new) from the phone the screen follows Claude Code into the session it starts. */
+const FOLLOW_CLEAR_MS = 30_000;
+/** The commands that start a new session in the same VS Code tab: the phone follows them (the text, trimmed). */
+const CLEARS = new Set(["/clear", "/reset", "/new"]);
+
 export interface AppState {
   demo: boolean;
   macs: Mac[];
@@ -146,6 +165,8 @@ export interface AppState {
   read: ReadState | null;
   /** Claude Code's usage meter on the selected Mac, as last heard; null until the Mac sent one (an older Mac never does). */
   usage: UsageFrame | null;
+  /** The selected Mac's windows' slash commands, by project id, as far as they were asked for. */
+  commands: Record<string, CommandsEntry>;
   push: PushState;
   route: Route;
   nav: Nav;
@@ -300,6 +321,12 @@ export class Store {
   /** When the last frame with content (projects, snapshot, message, stream, prompts) arrived (this phone's clock). */
   private lastFrameAt = -Infinity;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  /** The projects whose slash commands are being asked for (one request at a time each). */
+  private readonly commandsInFlight = new Set<string>();
+  /** Counts the Macs connected to: an answer about slash commands that comes after a switch is not this Mac's. */
+  private connection = 0;
+  /** After a /clear from the phone: the view, its window, the window's sessions then, and until when to follow. */
+  private following: { key: number; project: string; known: Set<string>; until: number } | null = null;
 
   constructor(options: StoreOptions) {
     this.demoOptions = options.demoOptions;
@@ -318,6 +345,7 @@ export class Store {
       projects: [],
       read: null,
       usage: null,
+      commands: {},
       push: {
         support: pushSupport(options.pushEnv),
         on: isPushOn(options.pushEnv),
@@ -512,15 +540,18 @@ export class Store {
   private connectTo(id: string | null): void {
     this.dropSource();
     this.lastFrameAt = -Infinity;
+    this.connection++;
+    this.commandsInFlight.clear();
+    this.following = null;
     const mac = this.state.macs.find((m) => m.id === id);
     this.skew = 0;
     if (!mac) {
-      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [], read: null, usage: null });
+      this.set({ macId: null, conn: "offline", remoteOff: false, refusal: null, projects: [], read: null, usage: null, commands: {} });
       this.updateBadge();
       this.updatePushBadge(this.state.projects);
       return;
     }
-    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [], read: this.state.demo ? null : loadReadState(mac.id), usage: null });
+    this.set({ macId: mac.id, conn: "offline", remoteOff: false, refusal: null, projects: [], read: this.state.demo ? null : loadReadState(mac.id), usage: null, commands: {} });
     this.updateBadge();
     this.updatePushBadge(this.state.projects);
     if (this.createSource) this.useSource(this.createSource(mac, this.state.demo));
@@ -538,6 +569,7 @@ export class Store {
         this.updateBadge();
         this.updatePushBadge(projects);
         this.watchForStartedSession();
+        this.followNewSession();
         this.ensureReadState();
         this.noteSeen();
       }),
@@ -578,6 +610,49 @@ export class Store {
     this.source?.connect();
   }
 
+  // ---- slash commands ----
+
+  /**
+   * Asks the window for its slash commands, unless that isn't needed: not connected, its Mac doesn't offer them
+   * (until the next welcome), a request is on its way, or the list is fresh (COMMANDS_FRESH_MS). A list it has stays
+   * on screen while a newer one is fetched, and when that fails.
+   */
+  loadCommands(project: string): void {
+    const source = this.source;
+    if (!source || this.state.conn !== "open" || this.commandsInFlight.has(project)) return;
+    const entry = this.state.commands[project];
+    if (entry?.status === "unsupported") return;
+    if (entry?.status === "ready" && entry.at > 0 && this.now() - entry.at < COMMANDS_FRESH_MS) return;
+    this.commandsInFlight.add(project);
+    if (entry?.status !== "ready") this.setCommands(project, { status: "loading", list: [], at: 0 });
+    const connection = this.connection;
+    source.commands(project).then(
+      (ack) => {
+        if (this.connection !== connection) return; // another Mac by now
+        this.commandsInFlight.delete(project);
+        this.setCommands(project, { status: "ready", list: parseCommands(ack.commands), at: this.now() });
+      },
+      (error) => {
+        if (this.connection !== connection) return;
+        this.commandsInFlight.delete(project);
+        const code = errorCode(error);
+        if (code === "unknown_type" || code === "unknown_method") this.setCommands(project, { status: "unsupported", list: [], at: 0 });
+        else if (this.state.commands[project]?.status !== "ready") this.setCommands(project, { status: "failed", list: [], at: 0 });
+      },
+    );
+  }
+
+  private setCommands(project: string, entry: CommandsEntry): void {
+    this.set({ commands: { ...this.state.commands, [project]: entry } });
+  }
+
+  /** A new connection: every list is asked for again when next needed, and a Mac that didn't offer them is asked again. */
+  private staleCommands(): void {
+    const commands: Record<string, CommandsEntry> = {};
+    for (const [project, entry] of Object.entries(this.state.commands)) if (entry.status !== "unsupported") commands[project] = { ...entry, at: 0 };
+    this.set({ commands });
+  }
+
   // ---- notifications ----
 
   /** The permission can change while the app is in the background (the Settings app): recompute it. */
@@ -594,6 +669,7 @@ export class Store {
    */
   private async onWelcome(frame: WelcomeFrame): Promise<void> {
     this.skew = typeof frame.now === "number" && Number.isFinite(frame.now) ? frame.now - this.now() : 0;
+    this.staleCommands();
     // Opening the app (each connection) asks for fresh usage numbers; not while the page is in the background.
     if (pageVisible()) this.askUsage();
     if (!this.state.push.on) {
@@ -878,6 +954,9 @@ export class Store {
       },
     });
     const { key, project, session } = view;
+    // A /clear (or /reset, /new) starts a new session in the same VS Code tab: the sessions listed now are what it is
+    // told apart from (taken before the answer, which can come after the new session is listed).
+    const clearing = session !== null && CLEARS.has(text.trim()) ? this.sessionIdsOf(project) : null;
     try {
       const ack = await source.send(project, session, text, images);
       // The ack names the uuid the CLI will replay; until that replay arrives the local copy stands in.
@@ -905,6 +984,10 @@ export class Store {
           this.watchForStartedSession();
         }
       }
+      if (clearing) {
+        this.following = { key, project, known: clearing, until: this.now() + FOLLOW_CLEAR_MS };
+        this.followNewSession();
+      }
     } catch (error) {
       const code = errorCode(error);
       // No answer in time, or a connection that closed first: the message may have arrived anyway.
@@ -928,6 +1011,32 @@ export class Store {
         );
       }
     }
+  }
+
+  /** The session ids the project lists right now. */
+  private sessionIdsOf(project: string): Set<string> {
+    return new Set(this.state.projects.find((p) => p.id === project)?.sessions.map((s) => s.id) ?? []);
+  }
+
+  /**
+   * After a /clear from the phone: once the window lists a session that wasn't there, within FOLLOW_CLEAR_MS, the
+   * screen moves to it, as the VS Code tab did. The watch ends when it fires, when time is up, and when the screen
+   * changes; a /clear that starts no session (a user command of that name) changes nothing.
+   */
+  private followNewSession(): void {
+    const following = this.following;
+    if (!following) return;
+    if (this.state.view?.key !== following.key || this.now() >= following.until) {
+      this.following = null;
+      return;
+    }
+    const listed = this.state.projects.find((p) => p.id === following.project);
+    const fresh = listed?.sessions.filter((s) => !following.known.has(s.id)) ?? [];
+    if (fresh.length === 0) return;
+    const newest = fresh.reduce((a, b) => (b.lastModified > a.lastModified ? b : a));
+    this.following = null;
+    this.navigate({ name: "session", project: following.project, session: newest.id }, "replace");
+    this.toast("Continuing in the new session");
   }
 
   /** The new-session screen becomes the session's screen: same view, its draft carried over. */
