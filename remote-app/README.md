@@ -78,6 +78,23 @@ A notification can wait on Apple's push service until the phone is reachable; wa
 - **Active.** Every session that is running or waiting for you, from all windows, in one list. Each row names its window, and the window lists below hold the rest.
 - **New.** A green dot marks a session with activity this phone hasn't shown yet. Opening it here clears it. Each phone keeps its own, apart from VS Code: reading a session in VS Code doesn't clear it here, nor the other way round.
 
+## Slash commands
+
+Type `/` in the message field and a list of the window's slash commands opens above it. These are the Claude Code commands VS Code's own `/` menu shows for that window:
+- built-ins such as `/compact`, `/context` and `/review`;
+- your own and the project's commands;
+- skills;
+- plugin and MCP commands.
+
+Typing more of a name narrows the list.
+
+- **Running one.** Tap it to run it. It is sent to the session like a message, so it runs in that session in VS Code, exactly as if you had typed it there. You see the result on the phone and on the Mac.
+- **Arguments.** A command that takes arguments has an arrow. It puts the command in the field with a space, so you can type the arguments before sending. Typing `/name arguments` and tapping Send works too.
+- **Commands VS Code shows a dialog for.** For `/context`, `/usage`, `/model`, `/mcp`, `/config` and `/settings`, VS Code opens its own dialog or picker on the Mac. From the phone, Claude Code answers them in text instead.
+- **Settings changed from the phone.** A model, effort level or setting changed this way applies to the running session, but VS Code's pickers keep showing the old value, and a new session starts from VS Code's settings.
+- **`/clear`, `/reset` and `/new`** start a new session in the same VS Code tab, and the phone follows it there.
+- **What it needs.** The list comes from the Mac, so it needs a Mac patched with this version. A Mac that wasn't says it can't list commands yet, and typing a command still works.
+
 ## Dictation
 
 Tap the microphone in the message field and speak. Your words appear in the field as you talk; tap the microphone again to stop, edit if you like, then send. Nothing is sent until you tap Send. On the iPhone the words come from Apple's dictation, in the phone's language or the one chosen in Settings → Dictation. If iOS doesn't offer dictation to the home-screen app, the microphone opens the keyboard instead, and its own microphone key does the same job.
@@ -122,7 +139,7 @@ For a local bridge, `http://localhost` and `http://127.0.0.1` addresses are acce
 
 ## Files
 
-- `src/lib/`: the protocol client, pairing, storage of paired Macs, what this phone has read (`readstate.ts`), the usage frame and how the card shows it (`usage.ts`), the transcript view model, image downscaling, demo data (tested with `bun test`).
+- `src/lib/`: the protocol client, pairing, storage of paired Macs, what this phone has read (`readstate.ts`), the usage frame and how the card shows it (`usage.ts`), matching slash commands to what is typed (`commands.ts`), the transcript view model, image downscaling, demo data (tested with `bun test`).
 - `src/state/`: the app's store, the home screen's lists and dots (`home.ts`), the demo source, question answers, text helpers.
 - `src/components/`: the screens (Home, Session, Pair, Settings) and their parts.
 - `src/styles/`: design tokens and styles (dark by default, light when the system is light).

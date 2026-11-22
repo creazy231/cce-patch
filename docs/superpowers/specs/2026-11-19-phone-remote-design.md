@@ -497,6 +497,7 @@ Client → hub:
 {t:"push_clear", id}                                                        → ack
 {t:"push_test", id}                                                         → ack (push_off | push_gone | push_failed + status)
 {t:"usage_refresh"}                                                         → {t:"usage", …} (no ack)
+{t:"commands", id, project}                                                 → {t:"ack", id, ok, error?, commands?:[{name, description?, argumentHint?, aliases?, plugin?}]}
 {t:"ping"}                                                                 → {t:"pong"}
 ```
 `choice` (the bridge turns it into the exact VS Code payload):
@@ -514,7 +515,7 @@ Hub → client:
 {t:"pending", project, session, pending:[Pending]}  the full list whenever it changes
 {t:"usage", state:"ok"|"none"|"unsupported", fiveHour?:{percent, resetsAt?}, week?:{percent, resetsAt?}, at?, account?}
                                                     after projects on welcome, after usage_refresh, and on any change
-{t:"ack", id, ok, error?, session?, status?}
+{t:"ack", id, ok, error?, session?, status?, commands?}
 {t:"error", code, message}                          e.g. bad_token, bad_code, revoked
 ```
 Push frames (protocol version 1, backwards compatible): `welcome.push` says whether this
@@ -557,6 +558,30 @@ account the way it does a `get_usage` read), shown with the new account until th
 The hub and the app keep it only as a non-empty string of at most 254 characters without
 control, bidi or invisible characters, and the app shows it as the card's first line. An old
 bridge sends none, and an old app ignores it.
+
+Slash commands (added 2026-11-22, protocol version 1, backwards compatible; design:
+`2026-11-22-slash-commands-design.md`).
+- **The request.** `commands` asks the project's window for its slash commands. They are the Claude Code commands VS
+  Code's `/` menu lists for it, named as VS Code names them (the plugin-prefixed alias when two share a name). The hub
+  routes it like the other acked actions (the hub's own window, or a peer), and the window has 15 s.
+- **Where the window reads them.** From what the extension already holds, in this order:
+  - a comms' loaded config (`settledConfig.commands`), the window's folder first;
+  - the stored copy the webview shows while that loads;
+  - a running session's `query.supportedCommands()`;
+  - a config still loading.
+
+  It never asks the extension to load one, which can start a Claude process. `[]` is a normal answer (no Claude Code
+  webview open, no list yet).
+- **The hub's checks on the ack:**
+  - at most 300 commands;
+  - names of 1–100 characters, each once, without control, bidi or invisible characters, and without whitespace
+    except one trailing ` (MCP)` (an MCP server's prompts);
+  - descriptions on one line, cut to 300 characters; argument hints and plugins to 100;
+  - at most 10 aliases, each with the name rule.
+- **Older bridges.** An old hub answers `unknown_type`, and an old peer window `unknown_method`. The app then says the
+  Mac can't list commands, and stops asking until the next welcome.
+- **Phone messages** (`send`) now carry `origin: {kind: "human"}`, as the webview marks what the user types. Claude Code
+  runs a plugin's local commands only from such a message.
 
 Only `bad_token`, `bad_origin` and `revoked` mean the phone itself was refused: the app
 stops and asks to pair again. Any other error (e.g. `unsupported_version` before the

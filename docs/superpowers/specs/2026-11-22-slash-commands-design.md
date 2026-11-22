@@ -1,6 +1,6 @@
 # CCE Remote: slash commands in the message field (design)
 
-Date: 2026-11-22 · Status: draft for the user's review.
+Date: 2026-11-22 · Status: built on 2026-11-22. The user was away and asked for every open decision to be made on their behalf; those decisions are listed under "Decisions made on the user's behalf".
 
 The user asked: "please implement something into the web app that makes the slash commands we have inside the claude code extensions also available in the web app. so when I start typing a slash it shows a list of the available slash commands i can then click on to send and execute them."
 
@@ -220,3 +220,10 @@ The Mac side needs `bun run patch.ts`, then a reload of every VS Code window. Wi
 - **Filter scoring** within the stated order.
 - **Exact timings:** the cache age and the request timeout.
 - **Test structure.**
+
+## As built
+
+Three places where the build went past this design. Each is a detail the design left open:
+- **Keyboard highlight.** A hardware keyboard's highlight is stored with the name it was chosen for, so a new name starts at the first row in the same render. This is the same as VS Code's own menu, which keys its highlight by query. A reset after the next frame let Enter pressed right after typing hit a row from the previous list.
+- **Notes.** The notes (loading, empty, no match, unsupported, failed) replace the listbox as a status line. They are not options inside it.
+- **Insert arrow.** It works while sending is disabled, because it only fills the field.
