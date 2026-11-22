@@ -50,6 +50,8 @@ export const Sliders = icon(
 );
 export const ArrowUp = icon(<path d="M12 19V5M6 11l6-6 6 6" />);
 export const ArrowDown = icon(<path d="M12 5v14M6 13l6 6 6-6" />);
+/** Puts something in the field to finish (an arrow toward the field's start, like a keyboard's fill-in). */
+export const ArrowUpLeft = icon(<path d="M17 17L7 7M7 15V7h8" />);
 export const Stop = icon(<rect x="7" y="7" width="10" height="10" rx="2.2" fill="currentColor" stroke="none" />);
 export const Photo = icon(
   <>

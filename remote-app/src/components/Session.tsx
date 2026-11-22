@@ -45,6 +45,12 @@ export function Session() {
     else setFresh(true);
   }, [items, stream, view?.loaded]);
 
+  // The window's slash commands, fetched when the screen opens (and after a reconnect) so that typing "/" finds them.
+  const viewProject = view?.project;
+  useEffect(() => {
+    if (connected && viewProject !== undefined) store.loadCommands(viewProject);
+  }, [viewProject, connected, store]);
+
   // The dock or the keyboard changed the visible height: keep the bottom in view.
   useEffect(() => {
     const el = scroller.current;
@@ -181,6 +187,7 @@ export function Session() {
         )}
         <Composer
           key={view.key}
+          project={view.project}
           draftKey={`${view.project}/${view.session ?? "new"}`}
           running={turnOpen}
           ready={connected && store.canSend()}

@@ -1,12 +1,15 @@
 // The message field at the bottom of a session: text (16 px, so iOS doesn't zoom), up to four photos
 // (downscaled on the phone before sending), dictation (the microphone in the field), Send, and Stop while
-// Claude is working.
+// Claude is working. Typing a slash and a name lists the window's slash commands above the field: a tap runs
+// one (it is sent like a message), and a command that takes arguments can be put in the field to finish.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { composerKey, rankCommands, slashQuery } from "../lib/commands";
 import { Dictation, dictationLang, dictationProblem, loadDictationLang, mergeDictation } from "../lib/dictation";
 import { downscaleImage } from "../lib/images";
-import type { ImageUpload } from "../lib/protocol";
+import type { ImageUpload, SlashCommand } from "../lib/protocol";
 import { ArrowUp, Close, Mic, Photo, Stop } from "./icons";
+import { SlashCommands, optionId } from "./SlashCommands";
 import { Spinner, useApp } from "./ui";
 
 const MAX_PHOTOS = 4;
@@ -19,6 +22,7 @@ interface PhotoDraft {
 }
 
 let photoSeq = 0;
+let listSeq = 0;
 
 const finePointer = (): boolean => {
   try {
@@ -29,6 +33,8 @@ const finePointer = (): boolean => {
 };
 
 export interface ComposerProps {
+  /** The window the session belongs to: its slash commands are listed. */
+  project: string;
   draftKey: string;
   /** Claude is working: show Stop. Sending still works (VS Code queues it). */
   running: boolean;
@@ -40,8 +46,8 @@ export interface ComposerProps {
   onStop: () => void;
 }
 
-export function Composer({ draftKey, running, ready: canGo, placeholder, onSend, onStop }: ComposerProps) {
-  const { store } = useApp();
+export function Composer({ project, draftKey, running, ready: canGo, placeholder, onSend, onStop }: ComposerProps) {
+  const { store, state } = useApp();
   const [text, setText] = useState(() => store.draft(draftKey));
   const [photos, setPhotos] = useState<PhotoDraft[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -51,6 +57,22 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
   /** What was in the field when dictation started: spoken words go after it. */
   const spokenAfter = useRef("");
   useEffect(() => () => dictation.abort(), [dictation]);
+  // The slash command list: open while the field has the focus and holds a slash and a name being typed.
+  const [focused, setFocused] = useState(false);
+  /** Escape closed the list; typing opens it again. */
+  const [dismissed, setDismissed] = useState(false);
+  /** The row a hardware keyboard selected, for the name it was selected for: another name starts at the first row. */
+  const [highlight, setHighlight] = useState<{ query: string | null; index: number }>({ query: null, index: 0 });
+  const listId = useMemo(() => `slash-commands-${++listSeq}`, []);
+  const query = slashQuery(text);
+  const entry = state.commands[project];
+  const open = focused && query !== null && !dismissed && !listening && (entry !== undefined || state.conn === "open");
+  const items = useMemo(() => (open && query !== null ? rankCommands(entry?.list ?? [], query) : []), [open, entry, query]);
+  const highlighted = highlight.query === query ? Math.min(highlight.index, Math.max(items.length - 1, 0)) : 0;
+  const fine = finePointer();
+  useEffect(() => {
+    if (open) store.loadCommands(project);
+  }, [open, project, store]);
 
   // Grow with the text up to a few lines, then scroll inside.
   useLayoutEffect(() => {
@@ -73,6 +95,7 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
 
   const change = (value: string) => {
     setText(value);
+    setDismissed(false);
     store.setDraft(draftKey, value);
   };
 
@@ -119,13 +142,31 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
     setListening(false);
   };
 
-  const send = () => {
-    if (!sendable) return;
+  /** Sends `value` with the photos, as Send does; the field and the photos clear only once the message was taken. */
+  const sendText = (value: string) => {
+    const body = value.trim();
+    if (!canGo || !ready || (body.length === 0 && photos.length === 0)) return;
     endDictation();
-    if (!onSend(text.trim(), photos.flatMap((p) => (p.upload ? [p.upload] : [])))) return;
+    if (!onSend(body, photos.flatMap((p) => (p.upload ? [p.upload] : [])))) return;
     change("");
     photos.forEach(release);
     setPhotos([]);
+  };
+  const send = () => sendText(text);
+
+  /** A slash command picked in the list runs: it is sent like a message. */
+  const run = (command: SlashCommand) => sendText(`/${command.name}`);
+
+  /** Puts the command in the field, with a space for its arguments; the keyboard stays up. */
+  const insert = (command: SlashCommand) => {
+    const value = `/${command.name} `;
+    change(value);
+    setTimeout(() => {
+      const el = area.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(value.length, value.length);
+    }, 0);
   };
 
   const addFiles = (list: FileList | null) => {
@@ -172,6 +213,19 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
         <Photo size={23} />
       </label>
 
+      {open && (
+        <SlashCommands
+          id={listId}
+          entry={entry}
+          items={items}
+          highlighted={fine ? highlighted : -1}
+          disabled={!canGo || !ready}
+          onRun={run}
+          onInsert={insert}
+          onRetry={() => store.loadCommands(project)}
+        />
+      )}
+
       <div class={listening ? "composer-field listening" : "composer-field"}>
         {photos.length > 0 && (
           <div class="photos">
@@ -197,15 +251,26 @@ export function Composer({ draftKey, running, ready: canGo, placeholder, onSend,
             value={text}
             placeholder={listening ? "Listening…" : placeholder}
             aria-label="Message"
+            aria-autocomplete="list"
+            aria-controls={open && items.length > 0 ? listId : undefined}
+            aria-activedescendant={open && fine && items.length > 0 ? optionId(listId, highlighted) : undefined}
             autocapitalize="sentences"
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
             onInput={(event) => {
               endDictation();
               change(event.currentTarget.value);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.isComposing && finePointer()) {
-                event.preventDefault();
-                send();
+              const key = composerKey(event, open, items.length, highlighted, fine);
+              if (key.action === "none") return;
+              event.preventDefault();
+              if (key.action === "move") setHighlight({ query, index: key.highlighted });
+              else if (key.action === "close") setDismissed(true);
+              else if (key.action === "send") send();
+              else {
+                const command = items[key.highlighted];
+                if (command) run(command);
               }
             }}
           />

@@ -1204,10 +1204,161 @@
 /* the composer */
 
 .composer {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 6px;
   padding: 10px calc(10px + var(--sar)) 10px calc(6px + var(--sal));
+}
+
+/* The slash command list: above the message field, over the conversation's last lines, about five rows tall. */
+.slash-commands {
+  position: absolute;
+  z-index: 3;
+  left: calc(8px + var(--sal));
+  right: calc(8px + var(--sar));
+  bottom: calc(100% - 2px);
+  max-height: min(292px, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--r-3);
+  background: var(--bg-2);
+  box-shadow:
+    inset 0 0 0 0.5px var(--line-2),
+    0 12px 32px rgba(0, 0, 0, 0.32);
+  animation: slash-in 0.16s var(--ease-out) both;
+}
+
+@keyframes slash-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.slash-list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+
+.slash-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 52px;
+  padding: 6px 4px 6px 12px;
+  border-radius: var(--r-2);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.slash-row:active,
+.slash-row.highlighted {
+  background: var(--bg-3);
+}
+
+.slash-row[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.slash-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.slash-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.slash-name {
+  flex: none;
+  max-width: 72%;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-hint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-plugin {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.slash-desc {
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-insert {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.slash-insert:active {
+  background: var(--bg-4);
+}
+
+.slash-insert:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.slash-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 14px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+}
+
+.slash-retry {
+  cursor: pointer;
 }
 
 .attach {

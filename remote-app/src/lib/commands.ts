@@ -63,3 +63,30 @@ export function parseCommands(value: unknown): SlashCommand[] {
     return [command];
   });
 }
+
+export type ComposerKeyAction = "none" | "move" | "run" | "close" | "send";
+
+/**
+ * What a key in the message field does, while the list may be open (`count` rows, `highlighted` one of them).
+ * Hardware keyboards (`fine`: a precise pointer) get Enter to run the highlighted command, ↑ ↓ to move, and Enter
+ * to send as today when nothing matches or the list is closed; a phone's Enter stays a newline. Escape closes an
+ * open list. Nothing happens while text is being composed (an IME) or with Shift.
+ */
+export function composerKey(
+  e: { key: string; shiftKey: boolean; isComposing: boolean },
+  open: boolean,
+  count: number,
+  highlighted: number,
+  fine: boolean,
+): { action: ComposerKeyAction; highlighted: number } {
+  const none = { action: "none" as const, highlighted };
+  if (e.isComposing) return none;
+  if (e.key === "Escape") return open ? { action: "close", highlighted } : none;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (!open || count === 0 || !fine) return none;
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    return { action: "move", highlighted: (((highlighted + step) % count) + count) % count };
+  }
+  if (e.key === "Enter" && !e.shiftKey && fine) return open && count > 0 ? { action: "run", highlighted } : { action: "send", highlighted };
+  return none;
+}
