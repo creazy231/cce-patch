@@ -1163,12 +1163,26 @@ describe("send", () => {
         type: "io_message",
         channelId: "c1",
         done: false,
-        message: { type: "user", uuid: sent.uuid, session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+        message: {
+          type: "user",
+          uuid: sent.uuid,
+          session_id: "",
+          parent_tool_use_id: null,
+          origin: { kind: "human" },
+          message: { role: "user", content: [{ type: "text", text: "hi" }] },
+        },
       },
     ]);
     await sidebar.flush();
     expect(events).toContainEqual(["s1", { t: "msg", message: expect.objectContaining({ uuid: sent.uuid, type: "user", isReplay: true }) }]);
     expect(sidebar.readerError).toBeUndefined();
+  });
+
+  test("a phone message carries origin human, as VS Code's typed ones do: Claude Code runs plugin-provided local commands only then", async () => {
+    const { agent, sidebar } = windowWith();
+    await agent.send("s1", "/compact");
+    expect(sidebar.received[0].message.origin).toEqual({ kind: "human" });
+    expect(sidebar.received[0].message.message.content).toEqual([{ type: "text", text: "/compact" }]);
   });
 
   test("a session with a running and a launching channel gets the prompt on the running one", async () => {
@@ -2077,5 +2091,101 @@ describe("usage", () => {
     });
     relayOf(provider).broadcast(provider.allComms, { five_hour: W });
     expect(usage).toEqual([{ supported: true, fiveHour: W, at: 5_000 }]);
+  });
+});
+
+// ---- slash commands: the list VS Code's `/` menu shows (the window's config, read from 2.1.330) -----------
+
+describe("commands", () => {
+  const A = [{ name: "compact", description: "Compact" }, { name: "init" }];
+  /** The agent read what the host holds and never made it load a config (that can start a Claude process). */
+  const noLoads = (...all: FakeComms[]) => expect(all.map((comms) => comms.configLoads)).toEqual(all.map(() => 0));
+
+  test("the settled config: VS Code's list", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.settledConfig = { commands: A };
+    expect(await agent.commands()).toEqual([{ name: "compact", description: "Compact" }, { name: "init" }]);
+    noLoads(sidebar, tab);
+  });
+
+  test("the comms for the window's folder comes first", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.configCwd = "/elsewhere";
+    sidebar.settledConfig = { commands: [{ name: "other" }] };
+    tab.configCwd = "/work/demo";
+    tab.settledConfig = { commands: A };
+    expect((await agent.commands()).map((c) => c.name)).toEqual(["compact", "init"]);
+    noLoads(sidebar, tab);
+  });
+
+  test("the stored copy while the live list loads", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    const asked: string[] = [];
+    sidebar.storedStartupConfig = {
+      read: (cwd: string) => {
+        asked.push(cwd);
+        return cwd === "/work/demo" ? { commands: [{ name: "stored" }] } : undefined;
+      },
+    };
+    expect(await agent.commands()).toEqual([{ name: "stored" }]);
+    expect(asked).toEqual(["/work/demo"]);
+    noLoads(sidebar, tab);
+  });
+
+  test("a running session's supportedCommands()", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.channels.get("c1")!.query = { supportedCommands: async () => [{ name: "live" }] };
+    expect(await agent.commands()).toEqual([{ name: "live" }]);
+    noLoads(sidebar, tab);
+  });
+
+  test("the pending config promise", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    tab.config = Promise.resolve({ commands: [{ name: "later" }] });
+    expect(await agent.commands()).toEqual([{ name: "later" }]);
+    noLoads(sidebar, tab);
+  });
+
+  test("the sources in order: settled, stored, a running session's, the pending config", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.settledConfig = { commands: [{ name: "settled" }] };
+    sidebar.storedStartupConfig = { read: () => ({ commands: [{ name: "stored" }] }) };
+    tab.channels.get("c2")!.query = { supportedCommands: async () => [{ name: "live" }] };
+    tab.config = Promise.resolve({ commands: [{ name: "pending" }] });
+    const names = async () => (await agent.commands()).map((c) => c.name);
+    expect(await names()).toEqual(["settled"]);
+    sidebar.settledConfig = { output_style: "default" }; // a config without a list is no list
+    expect(await names()).toEqual(["stored"]);
+    sidebar.storedStartupConfig = undefined;
+    expect(await names()).toEqual(["live"]);
+    tab.channels.get("c2")!.query = {};
+    expect(await names()).toEqual(["pending"]);
+    noLoads(sidebar, tab);
+  });
+
+  test("a supportedCommands() that fails moves on to the pending config", async () => {
+    const { agent, sidebar, tab } = windowWith();
+    sidebar.channels.get("c1")!.query = { supportedCommands: async () => Promise.reject(new Error("closed")) };
+    tab.config = Promise.resolve({ commands: [{ name: "pending" }] });
+    expect(await agent.commands()).toEqual([{ name: "pending" }]);
+  });
+
+  test("a host read that hangs: [] after hostReadMs", async () => {
+    const { agent, sidebar, tab } = windowWith({ hostReadMs: 50 });
+    sidebar.channels.get("c1")!.query = { supportedCommands: () => new Promise(() => {}) };
+    const late = new Promise((resolve) => setTimeout(() => resolve("late"), 1000));
+    expect(await Promise.race([agent.commands(), late])).toEqual([]);
+    noLoads(sidebar, tab);
+  });
+
+  test("no comms: []", async () => {
+    expect(await new WindowAgent({ provider: { allComms: new Set() }, vscode: {} }).commands()).toEqual([]);
+    expect(await new WindowAgent({}).commands()).toEqual([]);
+  });
+
+  test("names as VS Code shows them: a shared name takes its plugin-prefixed alias", async () => {
+    const { agent, sidebar } = windowWith();
+    sidebar.settledConfig = { commands: [{ name: "deploy" }, { name: "deploy", plugin: "ops", aliases: ["ops:deploy"] }] };
+    expect((await agent.commands()).map((c) => c.name)).toEqual(["deploy", "ops:deploy"]);
   });
 });

@@ -988,6 +988,20 @@ describe("requests, in both directions", () => {
   });
 });
 
+describe("the window's config (2.1.330)", () => {
+  // The agent reads the config the host already holds and must never make it load one (that can start a Claude
+  // process): both ways the host loads it count, so a test can check that none happened.
+  test("loadConfig() and get_claude_state count as config loads and answer with the settled config", async () => {
+    const comms = createFakeComms();
+    comms.settledConfig = { commands: [{ name: "compact" }] };
+    expect(comms.configLoads).toBe(0);
+    expect(await comms.loadConfig()).toEqual({ commands: [{ name: "compact" }] });
+    const answer = await comms.processRequest({ type: "request", channelId: "", requestId: "r-x", request: { type: "get_claude_state" } }, new AbortController().signal);
+    expect(answer).toEqual({ type: "get_claude_state_response", config: { commands: [{ name: "compact" }] }, cached: true });
+    expect(comms.configLoads).toBe(2);
+  });
+});
+
 describe("helpers for the test", () => {
   test("openChannel registers a channel shaped like the host's and returns it", () => {
     const comms = createFakeComms();

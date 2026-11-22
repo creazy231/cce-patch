@@ -45,6 +45,13 @@
 //    `refreshEveryHost()` (a switch made outside the window), `notifyLogout()` and `notifyLogin(comms)` clear
 //    the relay's numbers and make the comms forget the answer (`invalidateConfigCache()`), which the host
 //    then asks again.
+//  - The window's config (read from 2.1.330), as far as its slash commands go: each comms holds `config` (a
+//    promise while it loads), `settledConfig` (once loaded; `commands` is the list VS Code's `/` menu shows),
+//    `configCwd` (the folder it is for) and `storedStartupConfig.read(cwd)` (the stored copy the webview shows
+//    while the live one loads); `surfaceCwd()` is the folder its sessions start in. A test sets them. The host
+//    loads a config through `loadConfig()` or a webview's `get_claude_state`, which can start a Claude process;
+//    both count into `configLoads`, so a test can check that the agent never caused one. A channel's `query`
+//    can answer `supportedCommands()`, a running session's own list.
 //
 // Not modelled (the host differs here):
 //  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send, queued-command
@@ -128,8 +135,13 @@ export interface FakeChannel extends FakePendingChannel {
   cwd: string;
   atRest: boolean;
   turnComplete: boolean;
-  /** The CLI's SDK query, as far as a usage read uses it; the test sets it (the fake has no CLI process to ask). */
-  query?: FakeUsageQuery;
+  /** The CLI's SDK query, as far as a usage read and a command list use it; the test sets it (the fake has no CLI process to ask). */
+  query?: Partial<FakeUsageQuery> & Partial<FakeCommandsQuery>;
+}
+
+/** The part of the SDK query that answers a running session's slash commands: `latestCommands ?? initialization.commands`. */
+export interface FakeCommandsQuery {
+  supportedCommands(): Promise<unknown[]>;
 }
 
 /** A login as the host keeps `claude auth status --json`'s answer (its gJn): how, the account's email, the plan. */
@@ -207,6 +219,16 @@ export class FakeComms {
   cachedCliAuthStatus: FakeAuthStatus | undefined = undefined;
   /** Whether `claude auth status` has answered (the host asks when a webview starts and after an account change). */
   cachedCliAuthStatusFetched = false;
+  /** The window's config once loaded (the host's `settledConfig`); its `commands` is the list VS Code's `/` menu shows. */
+  settledConfig: Record<string, any> | undefined = undefined;
+  /** The config while it loads, and once loaded (the host's `config`, a promise). */
+  config: Promise<Record<string, any>> | undefined = undefined;
+  /** The folder the config is for (the host's `configCwd`). */
+  configCwd: string | undefined = undefined;
+  /** The stored copy of a folder's config, which the webview shows while the live one loads (the host's `storedStartupConfig`). */
+  storedStartupConfig: { read(cwd: string): Record<string, any> | undefined } | undefined = undefined;
+  /** How often the host was made to load a config (`loadConfig()`, `get_claude_state`); the agent must never cause one. */
+  configLoads = 0;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
   private readerDead = false;
@@ -295,6 +317,17 @@ export class FakeComms {
     return typeof status.email === "string" && status.email !== "" ? status.email : undefined;
   }
 
+  /** The folder this webview's sessions start in (the host's `surfaceCwd()`: the last launch's folder, else its own). */
+  surfaceCwd(): string {
+    return this.cwd;
+  }
+
+  /** Loads the config (the host's `loadConfig()`, which can start a Claude process): counted; answers the settled one. */
+  async loadConfig(): Promise<Record<string, any> | undefined> {
+    this.configLoads++;
+    return this.settledConfig;
+  }
+
   /** Webview → host. The host queues what it is given; its reader handles it later, in order, for as long as it lives. */
   async fromClient(message: Message): Promise<void> {
     this.received.push(message);
@@ -303,7 +336,8 @@ export class FakeComms {
 
   /**
    * Handles a webview request; `e` is the whole `{type:"request", channelId, requestId, request}` message.
-   * Answers `set_permission_mode`, `list_sessions_request` and `get_session_request`; any other type fails
+   * Answers `set_permission_mode`, `list_sessions_request`, `get_session_request` and `get_claude_state` (a counted
+   * config load); any other type fails
    * with "Unknown request type.", which `handleRequest` sends back as an error response, as the host does.
    */
   async processRequest(e: Message, _signal: AbortSignal): Promise<Message> {
@@ -314,6 +348,9 @@ export class FakeComms {
         return this.listSessions(e.request.entryPoint);
       case "get_session_request":
         return this.getSession(e.request.sessionId, e.request.purpose);
+      case "get_claude_state": // a webview asking for the config: the host loads it when it has none (counted)
+        this.configLoads++;
+        return { type: "get_claude_state_response", config: this.settledConfig, cached: this.settledConfig !== undefined };
       default:
         throw new Error("Unknown request type.");
     }

@@ -18,7 +18,10 @@
 //
 // The phone's actions are injected through the ORIGINAL methods, so the agent never takes its own
 // messages for webview traffic. The payloads are the webview's own (answers.js builds the answers), so
-// neither the host nor the CLI can tell the phone from VS Code.
+// neither the host nor the CLI can tell the phone from VS Code; a prompt is marked typed by a person
+// (`origin: {kind: 'human'}`) as the webview marks it. commands() lists the window's slash commands, the
+// Claude Code ones VS Code's `/` menu shows, from what the extension already holds, never by asking it to
+// load anything.
 //
 // Events:
 //   'project' (project)        the window's project, whenever refreshProject() finds it changed
@@ -44,6 +47,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { LIMITS, CAPS, toPhoneMessage, toStreamEvent, mergeHistory } = require('./transcript.js');
+const { toSlashCommands } = require('./commands.js');
 const { classifyPending, buildAnswer } = require('./answers.js');
 
 /** @typedef {import('./answers.js').Pending} Pending */
@@ -481,6 +485,9 @@ function userMessage(text, images) {
     uuid: crypto.randomUUID(),
     session_id: '',
     parent_tool_use_id: null,
+    // Typed by a person, as the webview marks what the user types. Claude Code (2.1.330) runs a plugin's local slash
+    // command only from a message marked so; everywhere else it takes an unmarked message for a person's too.
+    origin: { kind: 'human' },
     message: { role: 'user', content },
   };
 }
@@ -1551,6 +1558,53 @@ class WindowAgent extends EventEmitter {
       this._failed(error);
       return { refreshed: false, reading: copyReading(this._usage) };
     }
+  }
+
+  // ---- slash commands -------------------------------------------------------------------------------------
+
+  /**
+   * The window's slash commands, as VS Code's `/` menu lists Claude Code's own (named by commands.js). They are read
+   * from what the extension already holds, the first list found in this order:
+   *  1. a comms' loaded config (`settledConfig`), the comms for the window's first folder first;
+   *  2. the stored copy the webview shows while that loads (`storedStartupConfig.read(surfaceCwd())`);
+   *  3. a running session's own list (`query.supportedCommands()`), the window's folder first;
+   *  4. a comms' config still loading (`config`).
+   * 3 and 4 wait at most hostReadMs each. The host is never asked for a config (`get_claude_state`, `loadConfig()`):
+   * that can start a Claude process. [] when nothing has a list. Never rejects.
+   * @returns {Promise<import('./commands.js').SlashCommand[]>}
+   */
+  async commands() {
+    try {
+      const folder = this._folders()[0];
+      const home = folder === undefined ? undefined : path.resolve(folder);
+      const atHome = (/** @type {unknown} */ dir) => home !== undefined && isText(dir) && path.resolve(dir) === home;
+      /** @template T @param {T[]} list @param {(item: T) => unknown} dirOf */
+      const homeFirst = (list, dirOf) => [...list.filter((item) => atHome(dirOf(item))), ...list.filter((item) => !atHome(dirOf(item)))];
+      const comms = homeFirst(this._commsList(), (c) => guard(() => c.configCwd));
+      for (const c of comms) {
+        const list = guard(() => c.settledConfig.commands);
+        if (Array.isArray(list)) return toSlashCommands(list);
+      }
+      for (const c of comms) {
+        const list = guard(() => (typeof c.storedStartupConfig.read === 'function' && typeof c.surfaceCwd === 'function' ? c.storedStartupConfig.read(c.surfaceCwd()).commands : undefined));
+        if (Array.isArray(list)) return toSlashCommands(list);
+      }
+      const running = this._allChannels().filter((ref) => typeof guard(() => ref.channel.query.supportedCommands) === 'function');
+      for (const ref of homeFirst(running, (r) => guard(() => r.channel.cwd))) {
+        const list = await this._hostRead('the command list', () => ref.channel.query.supportedCommands()).catch(() => undefined);
+        if (Array.isArray(list)) return toSlashCommands(list);
+      }
+      for (const c of comms) {
+        const loading = guard(() => c.config);
+        if (!loading || typeof loading.then !== 'function') continue;
+        const config = await this._hostRead('the command list', () => loading).catch(() => undefined);
+        const list = guard(() => config.commands);
+        if (Array.isArray(list)) return toSlashCommands(list);
+      }
+    } catch (error) {
+      this._failed(error);
+    }
+    return [];
   }
 
   // ---- the phone's actions --------------------------------------------------------------------------------
