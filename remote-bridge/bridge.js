@@ -129,6 +129,7 @@ function start(bridge, vscodeOption) {
       copy: (/** @type {string} */ text) => vscode.env.clipboard.writeText(text),
     };
     agent.onCceRequest = (comms, request) => handleConnectionRequest(entry.coordinator, request, deps);
+    agent.chromeAutoAccept = () => entry.coordinator.chromeAutoAccept(); // the Claude in Chrome switch
     agent.start();
     entry.coordinator.start();
     onShutdown(provider, () => detach(provider));
@@ -240,6 +241,7 @@ async function detach(provider) {
   const agent = bridge.agent;
   if (agent) {
     agent.onCceRequest = null;
+    agent.chromeAutoAccept = null;
     try {
       agent.setActive(false);
     } catch {

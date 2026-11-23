@@ -18,6 +18,7 @@ const MESSAGES = {
   unknown_method: "The VS Code window that serves the phone can't do that. Reload the windows after patching.",
   bad_device: "That phone isn't paired.",
   bad_pairing: "The pairing code couldn't be made. Try again.",
+  bad_value: 'Choose on or off.',
 };
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
@@ -83,6 +84,12 @@ async function handleConnectionRequest(coordinator, request, { openExternal, cop
       const url = request.url;
       if (typeof url !== 'string') return { type, status: await coordinator.status(), error: 'bad_url' };
       return withStatus(coordinator, type, () => coordinator.setAppUrl(url));
+    }
+    case 'cce_remote_set_chrome_auto_accept': {
+      // The Claude in Chrome switch: only the tab can turn it on (no phone frame or hub call carries it).
+      const on = request.on;
+      if (typeof on !== 'boolean') return { type, status: await coordinator.status(), error: MESSAGES.bad_value };
+      return withStatus(coordinator, type, () => coordinator.setChromeAutoAccept(on));
     }
     case 'cce_remote_open_tailscale':
       try {

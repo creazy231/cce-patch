@@ -494,6 +494,39 @@
     return section;
   }
 
+  // The Claude in Chrome switch: while it's on, the bridge answers Claude in Chrome's permission
+  // prompts in VS Code for the user (remote access on or off).
+  function chromeSection() {
+    var on = status.chromeAutoAccept === true;
+    var section = makeSection("Claude in Chrome");
+    section.appendChild(
+      makeLine(on ? "ok" : "off", [
+        make("div", "cce-conn-strong", on ? "Auto-accept is on" : "Auto-accept is off"),
+        make(
+          "div",
+          "cce-conn-muted",
+          on ? "Claude in Chrome's permission prompts are answered for you in every VS Code window." : "You confirm Claude in Chrome's permission prompts yourself."
+        ),
+      ])
+    );
+    var label = busy === "chrome" ? "Saving…" : on ? "Turn off auto-accept" : "Turn on auto-accept";
+    section.appendChild(
+      makeActions([
+        makeButton("cce-conn-btn cce-conn-secondary", label, "chrome-auto-accept", function () {
+          act("chrome", "cce_remote_set_chrome_auto_accept", { on: !on });
+        }),
+      ])
+    );
+    section.appendChild(
+      make(
+        "div",
+        "cce-conn-hint",
+        "Only Claude in Chrome's prompts are answered, and each site is allowed for the rest of its session. A web page Claude reads could then steer it without you seeing a prompt."
+      )
+    );
+    return section;
+  }
+
   function removeDevice(id) {
     return function () {
       act("remove", "cce_remote_remove_device", { id: id });
@@ -569,6 +602,8 @@
       var pair = status.enabled ? pairSection(view) : null;
       if (pair) top.appendChild(pair);
       bottom.appendChild(devicesSection());
+      // An older bridge's status has no switch: its tab offers none.
+      if (typeof status.chromeAutoAccept === "boolean") bottom.appendChild(chromeSection());
     } else if (!fetchError) {
       top.appendChild(make("p", "cce-conn-muted", "Checking the connection…"));
     }

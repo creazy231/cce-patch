@@ -23,6 +23,7 @@ function fakeCoordinator(fail: Record<string, unknown> = {}) {
     newPairingCode: act("newPairingCode", { code: "ABCD-EFGH" }),
     removeDevice: act("removeDevice"),
     setAppUrl: act("setAppUrl"),
+    setChromeAutoAccept: act("setChromeAutoAccept"),
     openTailscale: act("openTailscale"),
   };
 }
@@ -110,6 +111,29 @@ describe("handleConnectionRequest", () => {
     const url = await handleConnectionRequest(coordinator, { type: "cce_remote_set_app_url", url: { href: "https://x" } }, deps());
     expect(url.error).toBe("bad_url");
     expect(coordinator.calls.filter(([name]) => name !== "status")).toEqual([]);
+  });
+
+  test("the Claude in Chrome switch: on and off run the action, then answer with a fresh status; anything else is refused", async () => {
+    const coordinator = fakeCoordinator();
+    const type = "cce_remote_set_chrome_auto_accept";
+    expect(await handleConnectionRequest(coordinator, { type, on: true }, deps())).toEqual({ type: `${type}_response`, status: { enabled: true, role: "hub", seq: 1 } });
+    expect(await handleConnectionRequest(coordinator, { type, on: false }, deps())).toEqual({ type: `${type}_response`, status: { enabled: true, role: "hub", seq: 2 } });
+    for (const on of ["true", 1, null, undefined]) {
+      const refused = await handleConnectionRequest(coordinator, { type, on }, deps());
+      expect(refused.type).toBe(`${type}_response`);
+      expect(refused.error).toBe("Choose on or off.");
+      expect(refused.status).toMatchObject({ enabled: true, role: "hub" });
+    }
+    expect(coordinator.calls.filter(([name]) => name !== "status")).toEqual([["setChromeAutoAccept", true], ["setChromeAutoAccept", false]]);
+  });
+
+  test("a switch that can't be saved: the reason, and a fresh status", async () => {
+    const coordinator = fakeCoordinator({ setChromeAutoAccept: new Error("EACCES: permission denied, open '/home/me/.cce-remote/state.json.tmp'") });
+    expect(await handleConnectionRequest(coordinator, { type: "cce_remote_set_chrome_auto_accept", on: true }, deps())).toEqual({
+      type: "cce_remote_set_chrome_auto_accept_response",
+      status: { enabled: true, role: "hub", seq: 1 },
+      error: "EACCES: permission denied, open '/home/me/.cce-remote/state.json.tmp'",
+    });
   });
 
   test("open_tailscale opens the app; when it can't, the download page; no status either way", async () => {

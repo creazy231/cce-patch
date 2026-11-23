@@ -531,3 +531,76 @@ describe("the Connection view", () => {
     expect(button(again, "Disconnect")).toBeDefined();
   });
 });
+
+describe("the Claude in Chrome switch", () => {
+  /** The section under the "Claude in Chrome" heading. */
+  const chromeSection = (host: FakeElement) =>
+    findAll(host, (el) => el.tagName === "SECTION" && el.children.some((child) => child.tagName === "H3" && child.textContent === "Claude in Chrome"))[0];
+  const type = "cce_remote_set_chrome_auto_accept";
+
+  test("off: says so and names the risk; Turn on sends the switch and shows Saving… while it runs; then it's on", async () => {
+    const t = setup(answer({ ...OFF, chromeAutoAccept: false }));
+    t.remote.mount(t.host);
+    await t.settle();
+    const off = chromeSection(t.host);
+    expect(off).toBeDefined();
+    expect(text(off)).toContain("Auto-accept is off");
+    expect(text(off)).toContain("You confirm Claude in Chrome's permission prompts yourself.");
+    expect(text(off)).toContain(
+      "Only Claude in Chrome's prompts are answered, and each site is allowed for the rest of its session. A web page Claude reads could then steer it without you seeing a prompt.",
+    );
+    expect(byClass(off, "cce-conn-dot").getAttribute("data-state")).toBe("off");
+
+    const saving = deferred<object>();
+    t.respondWith((request) => (request.type === type ? saving.promise : answer({ ...OFF, chromeAutoAccept: false })(request)));
+    button(off, "Turn on auto-accept").click();
+    await t.settle();
+    expect(t.sent.filter((r) => r.type === type)).toEqual([{ type, on: true }]);
+    const busy = button(chromeSection(t.host), "Saving…");
+    expect(busy).toBeDefined();
+    expect(busy.disabled).toBe(true);
+
+    saving.resolve({ type: `${type}_response`, status: { ...OFF, chromeAutoAccept: true } });
+    t.respondWith(answer({ ...OFF, chromeAutoAccept: true }));
+    await t.settle();
+    const on = chromeSection(t.host);
+    expect(text(on)).toContain("Auto-accept is on");
+    expect(text(on)).toContain("Claude in Chrome's permission prompts are answered for you in every VS Code window.");
+    expect(byClass(on, "cce-conn-dot").getAttribute("data-state")).toBe("ok");
+    button(on, "Turn off auto-accept").click();
+    await t.settle();
+    expect(t.sent.filter((r) => r.type === type).at(-1)).toEqual({ type, on: false });
+  });
+
+  test("shown with remote access on too, below the paired devices", async () => {
+    const t = setup(answer({ ...HUB, chromeAutoAccept: true }));
+    t.remote.mount(t.host);
+    await t.settle();
+    const section = chromeSection(t.host);
+    expect(text(section)).toContain("Auto-accept is on");
+    const sections = findAll(t.host, (el) => el.tagName === "SECTION");
+    expect(sections.indexOf(section)).toBeGreaterThan(sections.indexOf(byClass(t.host, "cce-conn-device").parentNode as FakeElement));
+  });
+
+  test("a bridge whose status doesn't have the switch shows no Claude in Chrome section", async () => {
+    const t = setup(answer(OFF));
+    t.remote.mount(t.host);
+    await t.settle();
+    expect(text(view(t.host))).toContain("Paired devices");
+    expect(chromeSection(t.host)).toBeUndefined();
+  });
+
+  test("a switch that can't be saved: the reason shows, and the switch stays as it was", async () => {
+    const t = setup((request) =>
+      request.type === type
+        ? { type: `${type}_response`, status: { ...OFF, chromeAutoAccept: false }, error: "EACCES: permission denied" }
+        : { type: `${request.type}_response`, status: { ...OFF, chromeAutoAccept: false } },
+    );
+    t.remote.mount(t.host);
+    await t.settle();
+    button(chromeSection(t.host), "Turn on auto-accept").click();
+    await t.settle();
+    expect(text(byClass(t.host, "cce-conn-notice"))).toBe("EACCES: permission denied");
+    expect(text(chromeSection(t.host))).toContain("Auto-accept is off");
+  });
+});

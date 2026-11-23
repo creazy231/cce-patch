@@ -172,6 +172,7 @@ describe("attach", () => {
         windows: 0,
         devices: [],
         appUrl: "",
+        chromeAutoAccept: false,
       },
     });
     // other requests still reach the extension
@@ -204,6 +205,50 @@ describe("attach", () => {
     expect(bridgeOf(one.provider)!.coordinator).toBe(bridgeOf(two.provider)!.coordinator);
     expect(bridgeOf(two.provider)!.agent!.enabled).toBe(false); // only the first agent's window reaches the phone
     expect((await ask(two.comms, { type: "cce_remote_status" })).status.role).toBe("off");
+  });
+});
+
+describe("the Claude in Chrome switch through the bridge", () => {
+  const chromeNavigate = { type: "tool_permission_request", toolName: "mcp__claude-in-chrome__navigate", inputs: { url: "https://example.com/" }, suggestions: [] };
+  const allowed = { type: "tool_permission_response", result: { behavior: "allow", updatedInput: chromeNavigate.inputs, updatedPermissions: [] } };
+  const reachedVsCode = (comms: FakeComms, requestId: string) => comms.sent.some((message) => message.type === "request" && message.requestId === requestId);
+
+  test("the tab turns it on: the window's Claude in Chrome prompts are answered, remote access stays off; turned off, VS Code asks again", async () => {
+    const { env } = await hostEnv();
+    const { provider, comms, vscode } = window();
+    attach(provider, { vscode, env });
+    await tick();
+    const before = comms.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(comms, before.requestId)).toBe(true);
+
+    expect(await ask(comms, { type: "cce_remote_set_chrome_auto_accept", on: true })).toMatchObject({
+      type: "cce_remote_set_chrome_auto_accept_response",
+      status: { enabled: false, role: "off", chromeAutoAccept: true },
+    });
+    expect(loadState(env)).toMatchObject({ enabled: false, chromeAutoAccept: true });
+    const asked = comms.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(comms, asked.requestId)).toBe(false);
+    expect(await asked).toEqual(allowed);
+
+    expect((await ask(comms, { type: "cce_remote_set_chrome_auto_accept", on: false })).status.chromeAutoAccept).toBe(false);
+    const after = comms.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(comms, after.requestId)).toBe(true);
+  });
+
+  test("a provider that goes away answers no prompt any more; the other window of the host still does", async () => {
+    const { env } = await hostEnv();
+    const one = window();
+    const two = window();
+    attach(one.provider, { vscode: one.vscode, env });
+    attach(two.provider, { vscode: two.vscode, env });
+    await tick();
+    await ask(one.comms, { type: "cce_remote_set_chrome_auto_accept", on: true });
+    await detach(one.provider);
+    const gone = one.comms.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(one.comms, gone.requestId)).toBe(true);
+    const still = two.comms.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(two.comms, still.requestId)).toBe(false);
+    expect(await still).toEqual(allowed);
   });
 });
 
