@@ -494,8 +494,8 @@
     return section;
   }
 
-  // The Claude in Chrome switch: while it's on, the bridge answers Claude in Chrome's permission
-  // prompts in VS Code for the user (remote access on or off).
+  // The Claude in Chrome switch: while it's on, the bridge answers Claude in Chrome's routine permission
+  // prompts in VS Code for the user (remote access on or off); flagged ones still ask.
   function chromeSection() {
     var on = status.chromeAutoAccept === true;
     var section = makeSection("Claude in Chrome");
@@ -505,7 +505,7 @@
         make(
           "div",
           "cce-conn-muted",
-          on ? "Claude in Chrome's permission prompts are answered for you in every VS Code window." : "You confirm Claude in Chrome's permission prompts yourself."
+          on ? "Claude in Chrome's routine permission prompts are answered for you in all your editor windows." : "You confirm Claude in Chrome's permission prompts yourself."
         ),
       ])
     );
@@ -521,7 +521,7 @@
       make(
         "div",
         "cce-conn-hint",
-        "Only Claude in Chrome's prompts are answered, and each site is allowed for the rest of its session. A web page Claude reads could then steer it without you seeing a prompt."
+        "Only routine prompts are answered: those that Claude Code's safety checks flag still ask you. Each site is allowed for the rest of its session. A web page Claude reads could steer it without a prompt."
       )
     );
     return section;

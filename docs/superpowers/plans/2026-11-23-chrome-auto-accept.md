@@ -103,3 +103,13 @@
 
 - A fresh whole-branch review (opus), then fix what it finds.
 - Merge into main, push, patch the Mac (`bun run patch.ts --no-commit-button`), and update memory.
+
+## Review follow-ups (done)
+
+The whole-branch review's findings, and what came of them (see the spec's "Decisions after the review"):
+- **Prompts marked for a person are left to the person:** `defaultToNo`, `personOnly`, a safety check's `reason`, a hook's `hookReason`. This was the review's Important finding: in auto mode, the switch would have approved the actions the safety check blocked.
+- **Tool names:** `mcp__claude-in-chrome__<tool>` with no `__` in `<tool>`.
+- **"Always" for site rules only.**
+- **The switch is read afresh as each prompt passes** (`store.chromeAutoAcceptOn`, fails closed). The watcher only logs changes made elsewhere, and a window that starts with the switch on says so.
+- **A prompt the host withdrew** is neither answered nor shown again.
+- **`--revert` turns the switch off** (`turnChromeAutoAcceptOff`).

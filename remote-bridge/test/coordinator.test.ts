@@ -1502,6 +1502,7 @@ describe("the Claude in Chrome switch", () => {
     expect(coordinator.chromeAutoAccept()).toBe(false);
     expect((await coordinator.status()).chromeAutoAccept).toBe(false);
     expect(fs.existsSync(statePath(env))).toBe(false);
+    expect(logs.filter((line) => line.includes("Claude in Chrome"))).toEqual([]);
 
     await coordinator.setChromeAutoAccept(true);
     expect(coordinator.chromeAutoAccept()).toBe(true);
@@ -1525,15 +1526,16 @@ describe("the Claude in Chrome switch", () => {
     expect(coordinator.chromeAutoAccept()).toBe(false);
   });
 
-  test("read from the file at start, where only true counts; off before start and after stop", async () => {
+  test("read from the file, where only true counts; off before start and after stop; a window that starts with it on says so", async () => {
     const env = tempEnv(await freePort());
     updateState((state) => {
       state.chromeAutoAccept = true;
     }, env);
-    const { coordinator } = makeCoordinator(env);
+    const { coordinator, logs } = makeCoordinator(env);
     expect(coordinator.chromeAutoAccept()).toBe(false);
     coordinator.start();
     expect(coordinator.chromeAutoAccept()).toBe(true);
+    expect(logs).toContain("Claude in Chrome auto-accept is on");
     await coordinator.stop();
     expect(coordinator.chromeAutoAccept()).toBe(false); // a window that closes answers nothing any more
 
@@ -1547,21 +1549,23 @@ describe("the Claude in Chrome switch", () => {
     expect((await second.status()).chromeAutoAccept).toBe(false);
   });
 
-  test("another window's change reaches this one through the state file", async () => {
+  test("a change made elsewhere (another window, any program) counts at once, and each window logs it", async () => {
     const env = tempEnv(await freePort());
-    const { coordinator } = makeCoordinator(env);
+    const { coordinator, logs } = makeCoordinator(env);
     coordinator.start();
     updateState((state) => {
       state.chromeAutoAccept = true;
     }, env);
-    await until("the switch on", () => coordinator.chromeAutoAccept());
+    expect(coordinator.chromeAutoAccept()).toBe(true);
+    await until("the change in the log", () => logs.includes("Claude in Chrome auto-accept was turned on (the state file changed)"));
     updateState((state) => {
       state.chromeAutoAccept = false;
     }, env);
-    await until("the switch off", () => !coordinator.chromeAutoAccept());
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+    await until("the change in the log", () => logs.includes("Claude in Chrome auto-accept was turned off (the state file changed)"));
   });
 
-  test("a file that can't be read keeps what was read last; a missing one is off", async () => {
+  test("a file that is missing, can't be read or isn't JSON is off at once (fails closed)", async () => {
     const env = tempEnv(await freePort());
     updateState((state) => {
       state.chromeAutoAccept = true;
@@ -1570,13 +1574,18 @@ describe("the Claude in Chrome switch", () => {
     coordinator.start();
     fs.chmodSync(statePath(env), 0o000);
     try {
-      expect((await coordinator.status()).chromeAutoAccept).toBe(true);
-      expect(coordinator.chromeAutoAccept()).toBe(true);
+      expect(coordinator.chromeAutoAccept()).toBe(false);
+      expect((await coordinator.status()).chromeAutoAccept).toBe(false);
     } finally {
       fs.chmodSync(statePath(env), 0o600);
     }
+    expect(coordinator.chromeAutoAccept()).toBe(true);
+    const json = fs.readFileSync(statePath(env), "utf8");
+    fs.writeFileSync(statePath(env), "{ broken");
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+    fs.writeFileSync(statePath(env), json);
+    expect(coordinator.chromeAutoAccept()).toBe(true);
     fs.rmSync(statePath(env));
-    expect((await coordinator.status()).chromeAutoAccept).toBe(false);
     expect(coordinator.chromeAutoAccept()).toBe(false);
   });
 

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_PORT, effectivePort, loadState, remoteHome, saveState, statePath, updateState, watchState } from "../lib/store.js";
+import { DEFAULT_PORT, chromeAutoAcceptOn, effectivePort, loadState, remoteHome, saveState, statePath, updateState, watchState } from "../lib/store.js";
 import { queue, sleep } from "./support";
 
 const STORE_PATH = path.resolve(import.meta.dir, "../lib/store.js");
@@ -690,5 +690,48 @@ describe("watchState", () => {
     const { env } = tempHome();
     const script = `const s = require(${JSON.stringify(STORE_PATH)}); s.loadState(process.env); s.watchState(() => {}, process.env, 50); process.stdout.write("ready");`;
     expect(await runScript(script, env, 8000)).toBe("ready"); // a persistent watcher would never let the script end
+  });
+});
+
+describe("chromeAutoAcceptOn", () => {
+  test("true only for chromeAutoAccept: true in a file that reads as a JSON object", () => {
+    const t = tempHome();
+    expect(chromeAutoAcceptOn(t.env)).toBe(false); // no file
+    const cases: Array<[string, boolean]> = [
+      [JSON.stringify({ chromeAutoAccept: true }), true], // no secret, nothing else: the switch alone counts
+      ["\uFEFF" + JSON.stringify({ chromeAutoAccept: true }), true],
+      [JSON.stringify({ chromeAutoAccept: false }), false],
+      [JSON.stringify({ chromeAutoAccept: "yes" }), false],
+      [JSON.stringify({ chromeAutoAccept: 1 }), false],
+      [JSON.stringify({}), false],
+      [JSON.stringify([{ chromeAutoAccept: true }]), false],
+      ["{ not json", false],
+      ["", false],
+    ];
+    for (const [content, on] of cases) {
+      writeRaw(t, content);
+      expect({ content, on: chromeAutoAcceptOn(t.env) }).toEqual({ content, on });
+    }
+  });
+
+  test("never writes: no file is made, nothing is repaired", () => {
+    const t = tempHome();
+    chromeAutoAcceptOn(t.env);
+    expect(fs.existsSync(t.dir)).toBe(false);
+    writeRaw(t, JSON.stringify({ chromeAutoAccept: true, enabled: "yes" }));
+    const before = fs.readFileSync(t.file, "utf8");
+    expect(chromeAutoAcceptOn(t.env)).toBe(true);
+    expect(fs.readFileSync(t.file, "utf8")).toBe(before);
+  });
+
+  test("a file that can't be read is off", () => {
+    const t = tempHome();
+    writeRaw(t, JSON.stringify({ chromeAutoAccept: true }));
+    fs.chmodSync(t.file, 0o000);
+    try {
+      expect(chromeAutoAcceptOn(t.env)).toBe(false);
+    } finally {
+      fs.chmodSync(t.file, 0o600);
+    }
   });
 });

@@ -459,8 +459,8 @@ class Coordinator extends EventEmitter {
     this._foreignKind = 'program';
     /** @type {State | null} the state last read, for a moment when the file cannot be read */
     this._lastState = null;
-    // The Connection tab's Claude in Chrome switch (`chromeAutoAccept: true` in the state file), as last read.
-    this._chromeAutoAccept = false;
+    /** @type {boolean | undefined} the Claude in Chrome switch as this window last saw it, for the log */
+    this._chromeSeen = undefined;
     /** @type {(() => void) | null} */
     this._unwatch = null;
 
@@ -505,6 +505,7 @@ class Coordinator extends EventEmitter {
     this._started = true;
     this._stopped = false;
     const read = this._read();
+    this._noteChromeSwitch(read.kind === 'ok' && read.state.chromeAutoAccept === true);
     this._setEnabled(read.kind === 'ok' && read.state.enabled === true);
     this._port = store.effectivePort(read.kind === 'ok' ? read.state : null, this.env);
     try {
@@ -554,8 +555,8 @@ class Coordinator extends EventEmitter {
     }
     this._stopped = true; // a serve-off try in flight does not arm another
     this._clearServeOffs(); // the window closes: nothing of it runs on
-    this._tellAgent(false); // and its agent mirrors nothing any more
-    this._chromeAutoAccept = false; // nor answers a prompt
+    this._tellAgent(false); // and its agent mirrors nothing any more (nor answers a prompt: chromeAutoAccept)
+    this._chromeSeen = undefined;
     const serveOff = lastWindow ? this._serveOffAtExit(port) : Promise.resolve(); // first: it is what matters if time runs out
     await this._shutdown();
     await serveOff;
@@ -682,7 +683,7 @@ class Coordinator extends EventEmitter {
 
     const fromHub = enabled ? await this._hubView() : { windows: 0, pairing: undefined, seen: new Map() };
     /** @type {ConnectionStatus} */
-    const status = { enabled, role: this.role, port, macName: this.macName(), tailscale, serve: { configured }, windows: fromHub.windows, devices: publicDevices(state?.devices, fromHub.seen), appUrl: isText(state?.appUrl) ? state.appUrl : '', chromeAutoAccept: this._chromeAutoAccept };
+    const status = { enabled, role: this.role, port, macName: this.macName(), tailscale, serve: { configured }, windows: fromHub.windows, devices: publicDevices(state?.devices, fromHub.seen), appUrl: isText(state?.appUrl) ? state.appUrl : '', chromeAutoAccept: this.chromeAutoAccept() };
     const error = this._errorText(enabled, configured, read.kind === 'unreadable' ? read.error : undefined);
     if (error) status.error = error;
     if (tailscale.dnsName) status.url = `https://${tailscale.dnsName}:${port}`;
@@ -752,13 +753,14 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Whether Claude in Chrome's permission prompts are answered for the user: the Connection tab's switch,
-   * `chromeAutoAccept: true` in the state file, as read at start, by status() and by the watcher (off
-   * before start and without a file; a file that cannot be read keeps what was read last). Cheap and
-   * synchronous: the window agent asks it as each such prompt passes.
+   * Whether Claude in Chrome's routine permission prompts are answered for the user: the Connection tab's
+   * switch, `chromeAutoAccept: true` in the state file, read afresh at every call, so a change counts at
+   * once in every window. Off before start and after stop, and when the file is missing, cannot be read or
+   * is not JSON (store.chromeAutoAcceptOn). Synchronous and small: the window agent asks it as each such
+   * prompt passes.
    */
   chromeAutoAccept() {
-    return this._chromeAutoAccept;
+    return this._started && store.chromeAutoAcceptOn(/** @type {any} */ (this.env));
   }
 
   /**
@@ -774,8 +776,21 @@ class Coordinator extends EventEmitter {
       next.chromeAutoAccept = on;
     }, /** @type {any} */ (this.env));
     this._lastState = state;
-    this._chromeAutoAccept = on;
+    this._chromeSeen = on; // this window's own change: the watcher has nothing to add
     this._say(`Claude in Chrome auto-accept was turned ${on ? 'on' : 'off'}`);
+  }
+
+  /**
+   * The log's account of the Claude in Chrome switch: that it is on, when this window starts with it on, and
+   * every change this window did not make itself (another window's tab, or any program that writes the file).
+   * @param {boolean} on
+   */
+  _noteChromeSwitch(on) {
+    if (on === this._chromeSeen) return;
+    const first = this._chromeSeen === undefined;
+    this._chromeSeen = on;
+    if (first && !on) return;
+    this._say(first ? 'Claude in Chrome auto-accept is on' : `Claude in Chrome auto-accept was turned ${on ? 'on' : 'off'} (the state file changed)`);
   }
 
   /** Opens the Tailscale app (macOS). Rejects with the reason when it cannot. */
@@ -805,7 +820,7 @@ class Coordinator extends EventEmitter {
   _onState(state) {
     if (!this._started) return;
     this._lastState = state;
-    this._chromeAutoAccept = state.chromeAutoAccept === true;
+    this._noteChromeSwitch(state.chromeAutoAccept === true);
     const enabled = state.enabled === true;
     const port = store.effectivePort(state, this.env);
     if (enabled === this._enabled && port === this._port) return;
@@ -1628,8 +1643,6 @@ class Coordinator extends EventEmitter {
   _read() {
     const read = readState(this.env);
     if (read.kind === 'ok') this._lastState = read.state;
-    // A file that cannot be read right now keeps the switch as it was; no file at all is off.
-    if (read.kind !== 'unreadable' && this._started) this._chromeAutoAccept = read.kind === 'ok' && read.state.chromeAutoAccept === true;
     return read;
   }
 

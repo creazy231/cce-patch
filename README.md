@@ -67,13 +67,17 @@ The bridge behind it (in [`remote-bridge/`](remote-bridge/)) is copied into the 
 
 ### Claude in Chrome Auto-Accept
 
-When Claude uses Chrome from VS Code, it asks twice: once for the browser tool, and once for each new site ("Claude in Chrome requires permission"). In auto mode, a `PermissionRequest` hook can't approve either one. The **Claude in Chrome** section at the bottom of the Connection tab has an opt-in switch, **Turn on auto-accept**, that answers these prompts for you.
+When Claude uses Chrome from VS Code, it asks twice: once for the browser tool, and once for each new site ("Claude in Chrome requires permission"). In auto mode, a `PermissionRequest` hook can't approve either one. The **Claude in Chrome** section at the bottom of the Connection tab has an opt-in switch, **Turn on auto-accept**, that answers the routine ones for you.
 
-- **Off until you turn it on.** It's one switch for every VS Code window, and it stays as you set it across restarts (`chromeAutoAccept` in `~/.cce-remote/state.json`). It works with the phone remote on or off. Only a VS Code window can turn it on; the phone can't.
-- **Only Claude in Chrome.** It answers only prompts for Claude in Chrome's tools (`mcp__claude-in-chrome__*`), as **Allow** would. A site card is answered with "always allow this site" for the session, so each site asks at most once per session. Other prompts get a plain allow, which writes no settings file and changes no mode. Every other prompt (other tools, questions, plans, dialogs) still reaches you, in VS Code and on the phone.
+- **Off until you turn it on.** It's one switch for all your patched editor windows, and it stays as you set it across restarts (`chromeAutoAccept` in `~/.cce-remote/state.json`). It works with the phone remote on or off. Only an editor window can turn it on; the phone can't.
+- **Only routine Claude in Chrome prompts.** It answers prompts for Claude in Chrome's tools (`mcp__claude-in-chrome__*`), as **Allow** would.
+  - A site card gets "always allow this site" for the session, so each site asks at most once per session.
+  - A tool prompt gets a plain allow, which writes no settings file and changes no mode.
+  - Every other prompt (other tools, questions, plans, dialogs) still reaches you, in VS Code and on the phone.
+- **Flagged prompts still ask you.** Claude Code marks some prompts for a person and pre-selects No: actions the auto-mode safety check blocked or couldn't judge, file uploads, and prompts a hook asks for. The switch leaves these to you.
 - **The risk.** While it's on, a web page Claude reads can steer Claude into acting on that page or on other sites, and you won't see a prompt (prompt injection). Turn it on only for browsing you would approve anyway.
-- **Turning it off.** The window you turn it off in stops answering at once, and the others within 2 s. A site already allowed in a session stays allowed in that session, as if you had picked "always allow this site" yourself.
-- **The log.** Each answer is logged in the Claude Code output channel as `Claude in Chrome auto-accept allowed <tool>`.
+- **Turning it off.** Every window stops answering at once. A site already allowed in a session stays allowed in that session, as if you had picked "always allow this site" yourself. `--revert` turns the switch off too.
+- **The log.** Claude Code's output channel logs each answer (`Claude in Chrome auto-accept allowed <tool>`). It also logs when a window starts with the switch on, and every time the switch is turned on or off.
 
 ### Multi-Editor Support
 
@@ -179,7 +183,7 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 ### Safety
 
 - **Backups** are created automatically on first run (`.bak` files alongside each original)
-- **Revert** restores the exact original files from backup and deletes `cce-remote/`. If the phone remote is on, it also turns it off and turns `tailscale serve` off for its port (when Tailscale doesn't answer within 20 s, it prints the command to run). It looks at serve only while remote access is on: a serve left on after remote access was turned off (a turn-off that failed, which the Connection tab reports) survives a revert, so run `tailscale serve --https=47821 off` yourself. `~/.cce-remote/` stays, with your paired phones, the phone app address and the Claude in Chrome switch (with the bridge gone, nothing answers Claude in Chrome's prompts; patching again brings the switch back as it was); delete it to forget them
+- **Revert** restores the exact original files from backup and deletes `cce-remote/`. If the phone remote is on, it also turns it off and turns `tailscale serve` off for its port (when Tailscale doesn't answer within 20 s, it prints the command to run). It looks at serve only while remote access is on: a serve left on after remote access was turned off (a turn-off that failed, which the Connection tab reports) survives a revert, so run `tailscale serve --https=47821 off` yourself. It also turns the Claude in Chrome switch off. `~/.cce-remote/` stays, with your paired phones and the phone app address; delete it to forget them
 - **Idempotent** — re-running the patch always reads from the original backup, so it's safe to run multiple times
 - **No network access** — the script only reads and writes local files (and `--revert` asks the local Tailscale CLI to turn `tailscale serve` off)
 - **Fails closed** — when an extension update moves code the patch hooks into, that part is skipped and reported as `FAIL`; the rest of the extension keeps working. The phone remote listens (on 127.0.0.1:47821 only) only while it's turned on
@@ -197,7 +201,7 @@ The patcher modifies three files inside each editor's Claude Code extension dire
 | Claude commit button only in the "Changes" title bar | Quit and reopen the editor once; `argv.json` changes need a full restart |
 | Claude commit button says Claude Code isn't logged in | Run `claude` in a terminal and log in, or set `claudeCommit.claudePath` |
 | Connection tab says the bridge isn't running | Run the patch again from a complete checkout (the patch output must show `ok   remote bridge files`), then `Reload Window` |
-| Claude in Chrome still asks with auto-accept on | `Reload Window` in every window after patching (a window that wasn't reloaded runs the old bridge, whose Connection tab has no Claude in Chrome section). Only Claude in Chrome's own prompts are answered: other prompts still ask |
+| Claude in Chrome still asks with auto-accept on | `Reload Window` in every window after patching (a window that wasn't reloaded runs the old bridge, whose Connection tab has no Claude in Chrome section). Prompts that Claude Code flags for a person (No pre-selected) still ask by design, and so do other tools' prompts |
 | Connection tab: "HTTPS certificates are off" | Click **Turn on HTTPS** and enable HTTPS certificates for your tailnet, then **Connect with Tailscale** again |
 | The phone can't reach the Mac | Turn Tailscale on on the phone, signed in as the same Tailscale user as the Mac |
 

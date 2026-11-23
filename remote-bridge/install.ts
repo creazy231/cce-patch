@@ -8,7 +8,8 @@
  *                      sessions list, drawn by webview-runtime.js (put in front of the bundle)
  *   webview/index.css  patchConnectionCss: the tab row's states and the Connection view
  *   cce-remote/        installRemoteBridge: bridge.js, the .js files under lib/, licence files
- *   ~/.cce-remote/     turnRemoteAccessOff (--revert): remote access off, `tailscale serve` off
+ *   ~/.cce-remote/     turnRemoteAccessOff (--revert): remote access off, `tailscale serve` off;
+ *                      turnChromeAutoAcceptOff (--revert): the Claude in Chrome switch off
  *
  * Every hook fails closed: a missing anchor leaves the file as it was (patch.ts prints a FAIL
  * verify line), and at runtime every call into the bridge or the runtime is guarded.
@@ -500,6 +501,36 @@ export function patchConnectionCss(css: string, jsCode: string, log: Log = conso
 }
 
 // ── --revert: remote access off ──
+
+/**
+ * `--revert`: turns the Connection tab's Claude in Chrome switch off in the state file, so that windows still
+ * running the bridge stop answering at once (they read the switch as each prompt passes), and a later patch
+ * starts with it off. Everything else in the file stays. True when it was on.
+ */
+export function turnChromeAutoAcceptOff(log: Log = console.log, { env = process.env }: { env?: Record<string, string | undefined> } = {}): boolean {
+  let store: any;
+  try {
+    store = createRequire(import.meta.url)("./lib/store.js");
+  } catch (error) {
+    log(`  Could not load remote-bridge/lib/store.js (${errorText(error)}): the Claude in Chrome switch left as it is`);
+    return false;
+  }
+  const file: string = store.statePath(env);
+  if (!store.chromeAutoAcceptOn(env)) {
+    log(`  Claude in Chrome auto-accept is off: nothing to turn off`);
+    return false;
+  }
+  try {
+    store.updateState((current: Record<string, unknown>) => {
+      current.chromeAutoAccept = false;
+    }, env);
+    log(`  Claude in Chrome auto-accept was on: turned it off (${file})`);
+    return true;
+  } catch (error) {
+    log(`  Could not turn Claude in Chrome auto-accept off in ${file}: ${errorText(error)}`);
+    return false;
+  }
+}
 
 /** What turnRemoteAccessOff needs of lib/tailscale.js's Tailscale (a test hands in a stub). */
 type ServeOff = { serveOff(port: number): Promise<{ ok: boolean; error?: string }> };

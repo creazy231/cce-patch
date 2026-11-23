@@ -34,6 +34,7 @@ import {
   patchExtensionRemote,
   patchWebviewConnection,
   removeRemoteBridge,
+  turnChromeAutoAcceptOff,
   turnRemoteAccessOff,
 } from "./remote-bridge/install.ts";
 
@@ -1342,12 +1343,15 @@ function patchOne(extDir: string, label: string, revert: boolean, remote: boolea
 /**
  * `--revert`'s part outside the extensions: removing the bridge doesn't stop `tailscale serve`
  * (a window that served keeps the port published until it's turned off), and the state file
- * would turn remote access on again after a later patch.
+ * would turn remote access, or the Claude in Chrome switch, on again after a later patch. Open
+ * windows keep the bridge until they reload, so the switch goes off first: they read it as each
+ * prompt passes.
  */
 async function revertRemoteAccess() {
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  Phone remote: remote access and tailscale serve`);
+  console.log(`  Phone remote: Claude in Chrome switch, remote access and tailscale serve`);
   console.log("=".repeat(60));
+  turnChromeAutoAcceptOff();
   await turnRemoteAccessOff();
 }
 

@@ -23,7 +23,8 @@ const MAX_ROUNDS = 5;
 
 /**
  * @typedef {{ id: string, name: string, tokenHash: string, origin: string, createdAt: number, lastSeenAt: number }} Device
- * `chromeAutoAccept`: the Connection tab's Claude in Chrome switch; only `true` is on, and no repair adds it.
+ * `chromeAutoAccept`: the Connection tab's Claude in Chrome switch; only `true` is on (chromeAutoAcceptOn), and
+ * no repair adds it.
  * @typedef {{ version: number, enabled: boolean, port: number, secret: string, appUrl: string, devices: Device[], chromeAutoAccept?: unknown, [key: string]: unknown }} State
  * @typedef {Record<string, string | undefined>} Env
  */
@@ -345,6 +346,22 @@ function watchState(cb, env = process.env, intervalMs = 2000) {
 }
 
 /**
+ * Whether the Connection tab's Claude in Chrome switch is on: `chromeAutoAccept: true` in the state file,
+ * read now and never written (nothing is repaired, no file or secret is made). A file that is missing,
+ * cannot be read or is not a JSON object is off: the switch fails closed.
+ * @param {Env} [env]
+ */
+function chromeAutoAcceptOn(env = process.env) {
+  try {
+    const text = readText(statePath(env));
+    const raw = text === null ? null : parseObject(text);
+    return raw !== null && raw.chromeAutoAccept === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The port the hub listens on: CCE_REMOTE_PORT when it holds a port (1 to 65535), else the
  * state's, else the default.
  * @param {{ port?: unknown } | null | undefined} state
@@ -357,4 +374,4 @@ function effectivePort(state, env = process.env) {
   return isPort(fromState) ? fromState : DEFAULT_PORT;
 }
 
-module.exports = { DEFAULT_PORT, remoteHome, statePath, loadState, saveState, updateState, watchState, effectivePort };
+module.exports = { DEFAULT_PORT, remoteHome, statePath, loadState, saveState, updateState, watchState, effectivePort, chromeAutoAcceptOn };

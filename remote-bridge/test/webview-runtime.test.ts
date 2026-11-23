@@ -547,7 +547,7 @@ describe("the Claude in Chrome switch", () => {
     expect(text(off)).toContain("Auto-accept is off");
     expect(text(off)).toContain("You confirm Claude in Chrome's permission prompts yourself.");
     expect(text(off)).toContain(
-      "Only Claude in Chrome's prompts are answered, and each site is allowed for the rest of its session. A web page Claude reads could then steer it without you seeing a prompt.",
+      "Only routine prompts are answered: those that Claude Code's safety checks flag still ask you. Each site is allowed for the rest of its session. A web page Claude reads could steer it without a prompt.",
     );
     expect(byClass(off, "cce-conn-dot").getAttribute("data-state")).toBe("off");
 
@@ -565,7 +565,7 @@ describe("the Claude in Chrome switch", () => {
     await t.settle();
     const on = chromeSection(t.host);
     expect(text(on)).toContain("Auto-accept is on");
-    expect(text(on)).toContain("Claude in Chrome's permission prompts are answered for you in every VS Code window.");
+    expect(text(on)).toContain("Claude in Chrome's routine permission prompts are answered for you in all your editor windows.");
     expect(byClass(on, "cce-conn-dot").getAttribute("data-state")).toBe("ok");
     button(on, "Turn off auto-accept").click();
     await t.settle();

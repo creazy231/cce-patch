@@ -43,8 +43,9 @@
 // which channel holds which session), and answers the Connection tab.
 //
 // With the Connection tab's "Claude in Chrome" switch on (`chromeAutoAccept`, which bridge.js points at
-// the coordinator), the agent also answers Claude in Chrome's permission prompts itself, as VS Code's
-// "Allow" would, whether remote access is on or off: VS Code never shows them (_autoAcceptChrome).
+// the coordinator), the agent also answers Claude in Chrome's routine permission prompts itself, as VS
+// Code's "Allow" would, whether remote access is on or off: VS Code never shows them. Those that Claude
+// Code marks for a person still reach VS Code and the phone (_autoAcceptChrome).
 //
 // State is kept in memory only, and bounded: AGENT_LIMITS.
 
@@ -197,20 +198,39 @@ function errorText(error) {
   }
 }
 
-/** @param {unknown} rule  one rule of an `addRules` suggestion */
-function isChromeRule(rule) {
-  if (!isRecord(rule)) return false;
-  if (rule.toolName === CHROME_SITE_RULE) return isText(rule.ruleContent); // one site; without one it could be every site
-  return isText(rule.toolName) && rule.toolName.startsWith(CHROME_TOOL_PREFIX);
+/**
+ * One of Claude in Chrome's tools: `mcp__claude-in-chrome__<tool>`, where the tool's name has no `__` (a server
+ * named `claude-in-chrome__x` would otherwise pass for it).
+ * @param {unknown} name
+ */
+function isChromeTool(name) {
+  if (!isText(name) || !name.startsWith(CHROME_TOOL_PREFIX)) return false;
+  const tool = name.slice(CHROME_TOOL_PREFIX.length);
+  return tool !== '' && !tool.includes('__');
 }
 
 /**
- * Whether the "always" of a Claude in Chrome prompt does nothing but allow Claude in Chrome for this session:
- * VS Code offers it, and every suggestion adds allow rules for the session, each for a site or one of Claude
- * in Chrome's tools. The site card's "always allow this site" is such a suggestion.
+ * Whether the prompt carries a sign that Claude Code wants a person to answer it: `defaultToNo` (the auto-mode
+ * safety check blocked the action or had no verdict, or another safety check asks), the words of a safety check
+ * (`reason`), a hook that asked (`hookReason`), or `personOnly`, should a host ever pass it on.
+ * @param {Record<string, any>} request
+ */
+function wantsPerson(request) {
+  return request.defaultToNo === true || request.personOnly === true || isText(request.reason) || isText(request.hookReason);
+}
+
+/** @param {unknown} rule  one rule of an `addRules` suggestion: a site, never every site */
+function isSiteRule(rule) {
+  return isRecord(rule) && rule.toolName === CHROME_SITE_RULE && isText(rule.ruleContent);
+}
+
+/**
+ * Whether the "always" of a Claude in Chrome prompt does nothing but allow sites for this session: VS Code
+ * offers it, and every suggestion adds allow rules for the session, each for one site. That is the site card's
+ * "always allow this site". A rule for a whole tool would outlast the switch, so it never counts.
  * @param {import('./answers.js').Pending} pending
  */
-function chromeOnlyForSession(pending) {
+function onlySitesForSession(pending) {
   if (!pending.canAlwaysAllow || pending.suggestions.length === 0) return false;
   return pending.suggestions.every(
     (suggestion) =>
@@ -220,7 +240,7 @@ function chromeOnlyForSession(pending) {
       suggestion.destination === 'session' &&
       Array.isArray(suggestion.rules) &&
       suggestion.rules.length > 0 &&
-      suggestion.rules.every(isChromeRule),
+      suggestion.rules.every(isSiteRule),
   );
 }
 
@@ -922,11 +942,12 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * A Claude in Chrome prompt while the switch is on: answered as VS Code's "Allow" would answer it, and
-   * swallowed, so neither VS Code nor the phone shows it. The answer goes out on the next microtask, once
-   * the host's send is over (the host waits for it from before it sends). It is the prompt's "always" when
-   * that does nothing but allow Claude in Chrome for this session (the site card's "always allow this
-   * site": a site then asks once a session), else a plain allow, which writes no settings file and
+   * A routine Claude in Chrome prompt while the switch is on: answered as VS Code's "Allow" would answer it,
+   * and swallowed, so neither VS Code nor the phone shows it. A prompt that Claude Code wants a person to
+   * answer (wantsPerson) is never answered. The answer goes out on the next microtask, once the host's send
+   * is over (the host waits for it from before it sends), unless the host has withdrawn the prompt by then.
+   * It is the prompt's "always" when that only allows sites for this session (the site card's "always allow
+   * this site": a site then asks once a session), else a plain allow, which writes no settings file and
    * changes no mode. When the answer cannot go out, VS Code and the phone get the prompt after all.
    * @param {any} comms
    * @param {Record<string, any>} message  `{type:'request', channelId, requestId, request}`
@@ -935,22 +956,24 @@ class WindowAgent extends EventEmitter {
   _autoAcceptChrome(comms, message) {
     const request = message.request;
     if (!isRecord(request) || request.type !== 'tool_permission_request') return false;
-    if (!isText(request.toolName) || !request.toolName.startsWith(CHROME_TOOL_PREFIX)) return false;
+    if (!isChromeTool(request.toolName) || wantsPerson(request)) return false;
     if (!this._chromeAutoAcceptOn()) return false;
     const pending = classifyPending(message, this.now());
     if (!pending || pending.kind !== 'tool') return false;
-    const always = chromeOnlyForSession(pending);
+    const always = onlySitesForSession(pending);
     const { response, mode } = buildAnswer(pending, { kind: always ? 'allowAlways' : 'allow' }, { autoMode: false });
     if (mode) return false; // a mode change is never the switch's to make (chromeOnlyForSession takes rules only)
     const { requestId, toolName } = pending;
     const site = always ? chromeSiteOf(pending.suggestions) : undefined;
     const answered = () => this._say(`window agent: Claude in Chrome auto-accept allowed ${toolName}${site ? ` and ${site} for the session` : ''}`);
     const failed = (/** @type {unknown} */ error) => {
+      if (!this._hostWaitsFor(comms, requestId)) return; // withdrawn meanwhile: nothing to show
       this._say(`window agent: could not answer a Claude in Chrome prompt (${errorText(error)}); VS Code asks instead`);
       this._showAfterAll(comms, message);
     };
     queueMicrotask(() => {
       try {
+        if (!this._hostWaitsFor(comms, requestId)) return; // withdrawn before the answer went out
         let queued;
         try {
           queued = this._inject(comms, { type: 'response', requestId, response });
@@ -965,6 +988,16 @@ class WindowAgent extends EventEmitter {
       }
     });
     return true;
+  }
+
+  /**
+   * Whether the comms' host still waits for the request: true unless its `outstandingRequests` shows it does not.
+   * @param {any} comms
+   * @param {string} requestId
+   */
+  _hostWaitsFor(comms, requestId) {
+    const outstanding = guard(() => comms.outstandingRequests);
+    return outstanding instanceof Map ? guard(() => outstanding.has(requestId), false) === true : true;
   }
 
   /** Whether the Claude in Chrome switch is on: only `true` counts, and a getter that throws is off. */

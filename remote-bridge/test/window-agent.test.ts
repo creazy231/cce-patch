@@ -2406,7 +2406,8 @@ describe("commands", () => {
 
 // ---- Claude in Chrome auto-accept (the Connection tab's switch) --------------------------------------
 
-// A tool prompt for one of Claude in Chrome's tools; its "always" would write the project's local settings.
+// A tool prompt for one of Claude in Chrome's tools, as the host sends it; its "always" would write the project's
+// local settings.
 const chromeNavigate = {
   type: "tool_permission_request",
   toolName: "mcp__claude-in-chrome__navigate",
@@ -2416,14 +2417,14 @@ const chromeNavigate = {
   defaultToNo: false,
   suppressAlwaysAllowRule: false,
 };
-// The site card: Chrome's extension wants the site approved; "always" allows the site for this session.
+// The site card: Chrome's extension wants the site approved; "always" allows the site for this session. Its reason
+// ("Claude in Chrome action on example.com") is of type "other", which the host does not pass on.
 const siteForSession = { type: "addRules", rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "example.com" }], behavior: "allow", destination: "session" };
 const chromeSite = {
   ...chromeNavigate,
   toolName: "mcp__claude-in-chrome__computer",
   inputs: { action: "left_click", coordinate: [10, 20], tabId: 7 },
   suggestions: [siteForSession],
-  reason: "Claude in Chrome action on example.com",
   toolUseId: "toolu_06",
 };
 const allowOnce = (request: { inputs: object }) => ({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: request.inputs, updatedPermissions: [] } });
@@ -2454,12 +2455,49 @@ describe("Claude in Chrome auto-accept", () => {
     expect(logs).toContain("window agent: Claude in Chrome auto-accept allowed mcp__claude-in-chrome__computer and example.com for the session");
   });
 
-  test("on: an always that allows one of Claude in Chrome's tools for the session is taken too", async () => {
+  test("on: an always for several sites is taken; one that allows a whole tool for the session is not", async () => {
     const { agent, sidebar } = windowWith();
     agent.chromeAutoAccept = () => true;
-    const toolForSession = { type: "addRules", rules: [{ toolName: "mcp__claude-in-chrome__navigate" }, { toolName: "ClaudeInChromeDomain", ruleContent: "example.org" }], behavior: "allow", destination: "session" };
-    const asked = sidebar.requestPermission("c1", { ...chromeNavigate, suggestions: [toolForSession] });
-    expect(await asked).toEqual({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: chromeNavigate.inputs, updatedPermissions: [toolForSession] } });
+    const sites = { ...siteForSession, rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "example.com" }, { toolName: "ClaudeInChromeDomain", ruleContent: "example.org" }] };
+    const both = sidebar.requestPermission("c1", { ...chromeSite, suggestions: [sites] });
+    expect(await both).toEqual({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: chromeSite.inputs, updatedPermissions: [sites] } });
+    // The tool prompt's session "always" (what VS Code offers in auto mode) would outlast the switch: a plain allow.
+    const toolForSession = { type: "addRules", rules: [{ toolName: "mcp__claude-in-chrome__tabs_context_mcp" }], behavior: "allow", destination: "session" };
+    const tool = { ...chromeNavigate, toolName: "mcp__claude-in-chrome__tabs_context_mcp", inputs: { createIfEmpty: true }, suggestions: [toolForSession] };
+    expect(await sidebar.requestPermission("c1", tool)).toEqual(allowOnce(tool));
+  });
+
+  test("on: a prompt Claude Code wants a person to answer reaches VS Code and the phone", async () => {
+    const { agent, sidebar, events } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    // defaultToNo: the auto-mode safety check blocked the action, had no verdict, or another safety check asks;
+    // reason: a safety check's own words (a file upload, say); hookReason: a hook asked; personOnly, should a host pass it on.
+    const flags: Array<Record<string, unknown>> = [
+      { defaultToNo: true, suppressAlwaysAllowRule: true, suggestions: [] },
+      { personOnly: true },
+      { reason: "Claude wants to upload a file to example.com — approval must come from the user" },
+      { hookReason: "A PreToolUse hook asked for confirmation" },
+    ];
+    const asked = flags.flatMap((flag) => [chromeNavigate, chromeSite].map((request) => sidebar.requestPermission("c1", { ...request, ...flag })));
+    for (const one of asked) expect(reachedVsCode(sidebar, one.requestId)).toBe(true);
+    await sidebar.flush();
+    expect(sidebar.received).toEqual([]);
+    expect(pendingEvents(events).at(-1)?.[1].pending.map((p: any) => p.requestId)).toEqual(asked.map((one) => one.requestId));
+  });
+
+  test("on: a prompt the host withdrew before the answer went out is neither answered nor shown", async () => {
+    const { agent, sidebar, logs } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const controller = new AbortController();
+    const asked = sidebar.requestPermission("c1", chromeNavigate, controller.signal);
+    asked.catch(() => {});
+    controller.abort(); // the CLI took the prompt back (a hook answered it, the turn was stopped) at once
+    await sleep(0);
+    await sidebar.flush();
+    expect(sidebar.received).toEqual([]);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(false);
+    expect(sidebar.logger.lines.filter((line) => line.includes("No handler"))).toEqual([]);
+    expect(logs.filter((line) => line.includes("auto-accept allowed"))).toEqual([]);
   });
 
   test("an always that does more than allow Claude in Chrome for the session gives way to a plain allow", async () => {
@@ -2515,6 +2553,8 @@ describe("Claude in Chrome auto-accept", () => {
       edit,
       plan,
       { ...chromeNavigate, toolName: "mcp__claude-in-chrome-x__navigate" },
+      { ...chromeNavigate, toolName: "mcp__claude-in-chrome__x__run_shell" }, // a server named claude-in-chrome__x
+      { ...chromeNavigate, toolName: "mcp__claude-in-chrome__" },
       { ...chromeNavigate, toolName: "mcp__claude-in-chrome" },
       { ...chromeNavigate, toolName: "Mcp__claude-in-chrome__navigate" },
       { ...chromeNavigate, type: undefined },
@@ -2564,6 +2604,24 @@ describe("Claude in Chrome auto-accept", () => {
     expect(reachedVsCode(sidebar, asked.requestId)).toBe(true);
     expect(pendingEvents(events).at(-1)?.[1].pending.map((p: any) => p.requestId)).toEqual([asked.requestId]);
     expect(logs.some((line) => line.includes("could not answer a Claude in Chrome prompt") && line.includes("the host went away"))).toBe(true);
+  });
+
+  test("an answer that fails once the host no longer waits for it: nothing is shown again", async () => {
+    const { agent, sidebar, events } = windowWith({
+      before: ({ sidebar }) => {
+        const fromClient = sidebar.fromClient.bind(sidebar);
+        (sidebar as any).fromClient = (message: Message) => {
+          if (message.type !== "response") return fromClient(message);
+          sidebar.outstandingRequests.delete(message.requestId); // the host let go of it, then failed
+          throw new Error("the reader stopped");
+        };
+      },
+    });
+    agent.chromeAutoAccept = () => true;
+    const asked = sidebar.requestPermission("c1", chromeNavigate);
+    await sleep(0);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(false);
+    expect(pendingEvents(events)).toEqual([]);
   });
 
   test("an answer the host rejects: the prompt reaches VS Code and the phone after all", async () => {

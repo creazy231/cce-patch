@@ -10,6 +10,7 @@ import {
   patchExtensionRemote,
   patchWebviewConnection,
   removeRemoteBridge,
+  turnChromeAutoAcceptOff,
   turnRemoteAccessOff,
 } from "../install.ts";
 import {
@@ -705,6 +706,29 @@ describe("turnRemoteAccessOff (--revert)", () => {
     expect(t.calls()).toContain("serve --https=47821 off");
     expect(text()).toMatch(/turned it off/i);
     expect(text()).toMatch(/serve.*47821.*off|off.*serve.*47821/i);
+  });
+
+  test("the Claude in Chrome switch on: turned off, everything else kept, remote access and Tailscale left alone", () => {
+    const t = setup({ ...ON, enabled: false, chromeAutoAccept: true }, { served: [47821] });
+    const { log, text } = logs();
+    expect(turnChromeAutoAcceptOff(log, { env: t.env })).toBe(true);
+    expect(t.state()).toEqual({ ...ON, enabled: false, chromeAutoAccept: false });
+    expect(t.calls()).toEqual([]);
+    expect(text()).toContain("Claude in Chrome auto-accept was on: turned it off");
+  });
+
+  test("the switch off, a file that isn't JSON, or no state file: nothing is written", () => {
+    for (const state of [{ ...ON, chromeAutoAccept: false }, ON, { ...ON, chromeAutoAccept: "yes" }, "{ not json"]) {
+      const t = setup(state);
+      const before = readFileSync(t.file, "utf8");
+      const { log, text } = logs();
+      expect(turnChromeAutoAcceptOff(log, { env: t.env })).toBe(false);
+      expect(readFileSync(t.file, "utf8")).toBe(before);
+      expect(text()).toContain("Claude in Chrome auto-accept is off");
+    }
+    const none = setup();
+    expect(turnChromeAutoAcceptOff(logs().log, { env: none.env })).toBe(false);
+    expect(existsSync(none.home)).toBe(false);
   });
 
   test("serve already off: still reported as off", async () => {
