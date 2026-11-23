@@ -683,7 +683,7 @@ describe("fromClient simulates the host", () => {
 
     const launching = comms.pendingChannels.get("c7") as NonNullable<ReturnType<typeof comms.pendingChannels.get>>;
     const running = comms.promoteChannel("c7");
-    expect(running).toEqual({ in: launching.in, sessionId: "s5", cwd: "/work/demo/sub", atRest: true, turnComplete: false });
+    expect(running).toEqual({ in: launching.in, sessionId: "s5", cwd: "/work/demo/sub", atRest: true, turnComplete: false, runningBackgroundTasks: 0 });
     expect(comms.promoteChannel("c8").cwd).toBe("/work/demo");
     expect(comms.pendingChannels.size).toBe(0);
   });
@@ -1007,7 +1007,7 @@ describe("helpers for the test", () => {
     const comms = createFakeComms();
     const channel = comms.openChannel("c1", "s1");
     expect(comms.channels.get("c1")).toBe(channel);
-    expect(channel).toEqual({ in: expect.anything(), sessionId: "s1", cwd: "/work/demo", atRest: true, turnComplete: false });
+    expect(channel).toEqual({ in: expect.anything(), sessionId: "s1", cwd: "/work/demo", atRest: true, turnComplete: false, runningBackgroundTasks: 0 });
     expect(typeof channel.in.enqueue).toBe("function");
     expect(typeof channel.in.done).toBe("function");
     expect(comms.sent).toEqual([]);
@@ -1036,7 +1036,7 @@ describe("helpers for the test", () => {
     expect(comms.channels.get("c1")).toBe(running);
     expect(running).not.toBe(launching);
     expect(running.in).toBe(launching.in);
-    expect(running).toEqual({ in: launching.in, sessionId: "s1", cwd: "/work/demo/sub", atRest: true, turnComplete: false });
+    expect(running).toEqual({ in: launching.in, sessionId: "s1", cwd: "/work/demo/sub", atRest: true, turnComplete: false, runningBackgroundTasks: 0 });
     expect(comms.sent).toEqual([]);
   });
 
@@ -1102,6 +1102,38 @@ describe("helpers for the test", () => {
     expect(flags()).toEqual([false, false]);
     comms.emit("c1", { type: "result", subtype: "error_during_execution", is_error: true });
     expect(flags()).toEqual([true, false]);
+  });
+
+  test("background tasks keep the channel from rest past a result; the list emptying does not bring it back, the next result does", () => {
+    const { comms, channel } = sidebar();
+    const flags = () => [channel.atRest, channel.turnComplete, channel.runningBackgroundTasks];
+    expect(flags()).toEqual([true, false, 0]);
+    comms.emit("c1", { type: "system", subtype: "init", session_id: "s1" });
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "b1", task_type: "local_bash" }] });
+    expect(flags()).toEqual([false, false, 1]);
+    comms.emit("c1", { type: "result", subtype: "success", is_error: false, num_turns: 2 });
+    expect(flags()).toEqual([false, false, 1]); // the turn ended, the shell runs on
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed", tasks: [] });
+    expect(flags()).toEqual([false, false, 0]); // the host keeps what it had
+    comms.emit("c1", { type: "system", subtype: "init", session_id: "s1" });
+    comms.emit("c1", { type: "result", subtype: "success", is_error: false, num_turns: 1 });
+    expect(flags()).toEqual([true, true, 0]);
+    // an ambient task is not counted, but any word from a task clears the flags, as the host's BWe/QY do
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a1", task_type: "local_agent", ambient: true }] });
+    expect(flags()).toEqual([true, true, 0]);
+    for (const subtype of ["task_started", "task_progress", "task_updated", "task_notification"]) {
+      comms.emit("c1", { type: "system", subtype: "init", session_id: "s1" });
+      comms.emit("c1", { type: "result", subtype: "success", is_error: false, num_turns: 1 });
+      comms.emit("c1", { type: "system", subtype, task_id: "a1" });
+      expect([subtype, ...flags()]).toEqual([subtype, false, false, 0]);
+    }
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed", tasks: [] });
+    expect(flags()).toEqual([false, false, 0]);
+    // an entry that is not an object is counted; a list that is not an array counts as one
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed", tasks: [null, { task_id: "m1", task_type: "monitor_ws", ambient: false }] });
+    expect(flags()).toEqual([false, false, 2]);
+    comms.emit("c1", { type: "system", subtype: "background_tasks_changed" });
+    expect(flags()).toEqual([false, false, 1]);
   });
 
   test("emit of a system/init names the session of the channel before the message goes out, as the host's loop does", () => {

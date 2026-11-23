@@ -54,9 +54,14 @@
 //    can answer `supportedCommands()`, a running session's own list.
 //
 // Not modelled (the host differs here):
-//  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send, queued-command
-//    and background-task counters. A `rate_limit_event` after a `result`, for one, leaves `turnComplete`
-//    true here and makes it false in the host.
+//  - `atRest`/`turnComplete` follow a simplified rule, without the host's outstanding-send and queued-command
+//    counters. A `rate_limit_event` after a `result`, for one, leaves `turnComplete` true here and makes it
+//    false in the host. The background-task counter is kept (`runningBackgroundTasks`, read from 2.1.330): a
+//    result with tasks running is not at rest, and the list emptying does not bring it back. Any word from a
+//    task (`system/task_*`) clears both flags, as in the host, even one from an ambient task; other messages
+//    outside the host's keep lists (a `system/status` that is not `status: null`, say) leave them alone here.
+//    A result for a task notification that ran no turn counts like any other here; the host counts it only
+//    after a turn.
 //  - `closeChannel` removes the channel at once; the host removes it after the CLI has shut down.
 //  - `fromClient` is the base class's. The concrete class puts a classifier for panel-load-failure
 //    messages in front of it and holds the first messages back until the shell path has been read.
@@ -135,6 +140,8 @@ export interface FakeChannel extends FakePendingChannel {
   cwd: string;
   atRest: boolean;
   turnComplete: boolean;
+  /** The non-ambient tasks the CLI's last `background_tasks_changed` listed (the host's jWe); a result is at rest only at 0. */
+  runningBackgroundTasks: number;
   /** The CLI's SDK query, as far as a usage read and a command list use it; the test sets it (the fake has no CLI process to ask). */
   query?: Partial<FakeUsageQuery> & Partial<FakeCommandsQuery>;
 }
@@ -717,7 +724,7 @@ export class FakeComms {
       if (cwd !== undefined) this.launchCwds.set(channelId, cwd);
       return launching;
     }
-    const channel: FakeChannel = { in: new FakeInput(), sessionId, cwd: posix.resolve(this.cwd, cwd ?? this.cwd), atRest: true, turnComplete: false };
+    const channel: FakeChannel = { in: new FakeInput(), sessionId, cwd: posix.resolve(this.cwd, cwd ?? this.cwd), atRest: true, turnComplete: false, runningBackgroundTasks: 0 };
     this.channels.set(channelId, channel);
     return channel;
   }
@@ -736,6 +743,7 @@ export class FakeComms {
       cwd: posix.resolve(this.cwd, this.launchCwds.get(channelId) ?? this.cwd),
       atRest: launching.in.queue.length === 0,
       turnComplete: false,
+      runningBackgroundTasks: 0,
     };
     this.channels.set(channelId, channel);
     this.pendingChannels.delete(channelId);
@@ -794,12 +802,25 @@ export class FakeComms {
   }
 }
 
-/** A result ends the turn (an error result is at rest but not complete); anything the CLI does within a turn starts it; other messages leave the flags alone. */
+/**
+ * A result ends the turn (an error result is at rest but not complete), unless background tasks run on: then neither
+ * flag is set, and the list emptying leaves them as they are (the next result sets them). A list that names a running
+ * task clears both, as anything the CLI does within a turn does, and so does any word from a task (`system/task_*`,
+ * an ambient one's too); other messages leave the flags alone.
+ */
 function noteTurnState(channel: FakeChannel, message: Message): void {
-  if (message.type === "result") {
-    channel.atRest = true;
-    channel.turnComplete = message.is_error !== true;
-  } else if (message.type === "user" || message.type === "assistant" || message.type === "stream_event" || (message.type === "system" && message.subtype === "init")) {
+  const fromTask = message.type === "system" && typeof message.subtype === "string" && message.subtype.startsWith("task_");
+  if (message.type === "system" && message.subtype === "background_tasks_changed") {
+    const tasks = message.tasks;
+    channel.runningBackgroundTasks = Array.isArray(tasks) ? tasks.filter((task) => task === null || typeof task !== "object" || task.ambient !== true).length : 1;
+    if (channel.runningBackgroundTasks > 0) {
+      channel.atRest = false;
+      channel.turnComplete = false;
+    }
+  } else if (message.type === "result") {
+    channel.atRest = channel.runningBackgroundTasks === 0;
+    channel.turnComplete = message.is_error !== true && channel.runningBackgroundTasks === 0;
+  } else if (message.type === "user" || message.type === "assistant" || message.type === "stream_event" || (message.type === "system" && message.subtype === "init") || fromTask) {
     channel.atRest = false;
     channel.turnComplete = false;
   }

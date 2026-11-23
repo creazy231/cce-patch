@@ -32,14 +32,15 @@
 //                                 | {kind:'open', session, requestIds}
 //                                     (the session's live prompts, every time they may have changed)
 //                                 | {kind:'done', session, title, isError, durationMs, text}
-//                                     (a turn ended)
+//                                     (the session is done: its last turn ended and nothing runs on in the
+//                                     background, is queued or waits; said once, with that turn's result)
 //   'usage' (reading)          Claude Code's usage meter changed: {supported, fiveHour?, week?, at?, account?}
 //                              (see UsageReading; refreshUsage() reads it afresh through a Claude process)
 //
 // Every window of every patched editor runs an agent, so while remote access is off (the coordinator
 // says so: setEnabled) it maps, keeps and emits no session messages at all; it only follows the few
-// small things a phone needs the moment remote access is turned on (prompts, turns, which channel
-// holds which session), and answers the Connection tab.
+// small things a phone needs the moment remote access is turned on (prompts, turns, background tasks,
+// which channel holds which session), and answers the Connection tab.
 //
 // State is kept in memory only, and bounded: AGENT_LIMITS.
 
@@ -556,6 +557,10 @@ class WindowAgent extends EventEmitter {
     this._liveKeys = 0;
     /** @type {Map<string, boolean>} sessions whose turn is open (system/init seen, no result yet) */
     this._turns = new Map();
+    /** @type {WeakMap<object, Map<string, { running: number, agents: boolean }>>} per comms: per channel, what the CLI's last background_tasks_changed listed */
+    this._tasks = new WeakMap();
+    /** @type {Map<string, { isError: boolean, durationMs: number, text: string }>} sessions whose last turn ended before they were done: what their `done` says */
+    this._owed = new Map();
     /** @type {Set<string>} the last AGENT_LIMITS.announced request ids that an attention event announced, oldest first */
     this._announced = new Set();
     /** @type {Map<string, number>} sessions shown as "New session": when they were first shown */
@@ -838,7 +843,9 @@ class WindowAgent extends EventEmitter {
     } else if (sdk.type === 'result') {
       this._turns.delete(sessionId);
       this._changed();
-      this._emitDone(sessionId, sdk);
+      this._turnEnded(comms, channelId, sessionId, sdk);
+    } else if (sdk.type === 'system' && sdk.subtype === 'background_tasks_changed') {
+      this._noteTasks(comms, channelId, sdk.tasks); // a result reads it (_settle)
     } else if (sdk.type === 'system' && sdk.subtype === 'session_title_changed') {
       this._changed();
     }
@@ -876,8 +883,12 @@ class WindowAgent extends EventEmitter {
       const owner = this._entrySession(entry);
       if (owner) affected.add(owner);
     }
-    if (sessionId) this._turns.delete(sessionId);
+    if (sessionId) {
+      this._turns.delete(sessionId);
+      this._owed.delete(sessionId); // the process is gone: nothing more will end
+    }
     this._channelInits.get(comms)?.delete(channelId);
+    this._tasks.get(comms)?.delete(channelId);
     this._claimed.delete(this._channelKey(comms, channelId));
     for (const owner of affected) this._emitPending(owner);
     this._changed();
@@ -1100,9 +1111,11 @@ class WindowAgent extends EventEmitter {
       if (sessionId) withChannel.add(sessionId);
     }
     for (const sessionId of this._turns.keys()) if (!withChannel.has(sessionId)) this._turns.delete(sessionId);
+    for (const sessionId of this._owed.keys()) if (!withChannel.has(sessionId)) this._owed.delete(sessionId);
     for (const comms of this._commsList()) {
-      const inits = this._channelInits.get(comms);
-      if (inits) for (const channelId of inits.keys()) if (this._channelAt(comms, channelId) === undefined) inits.delete(channelId);
+      for (const byChannel of [this._channelInits.get(comms), this._tasks.get(comms)]) {
+        if (byChannel) for (const channelId of byChannel.keys()) if (this._channelAt(comms, channelId) === undefined) byChannel.delete(channelId);
+      }
     }
     for (const sessionId of affected) this._emitPending(sessionId);
     if (affected.size > 0) this._changed();
@@ -1385,8 +1398,10 @@ class WindowAgent extends EventEmitter {
     const enabled = on === true;
     if (enabled === this._enabled) return;
     this._enabled = enabled;
-    if (!enabled) this._live.clear();
-    else this.replayAttention();
+    if (!enabled) {
+      this._live.clear();
+      this._owed.clear();
+    } else this.replayAttention();
   }
 
   /**
@@ -2068,20 +2083,62 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * A turn ended: `done`. An error is a result that says so (`is_error`) or whose subtype is anything but
-   * `success`; `text` is the start of the result's own text.
-   * @param {string} sessionId @param {Record<string, any>} sdk  the SDK `result` message
+   * A turn ended. What its `done` says is kept for the session, the last turn's over an earlier one: an error is a
+   * result that says so (`is_error`) or whose subtype is anything but `success`; `text` is the start of the result's
+   * own text. The result the CLI ends a task notification with when it ran no turn for it is no turn (the host does
+   * not count it either), so it keeps nothing. `done` goes out once the session is done (_settle). Nothing is kept
+   * while remote access is off.
+   * @param {any} comms @param {string} channelId @param {string} sessionId @param {Record<string, any>} sdk  the SDK `result` message
    */
-  _emitDone(sessionId, sdk) {
-    if (!this._enabled) return;
-    this._emitAttention({
-      kind: 'done',
-      session: sessionId,
-      title: this._titleOf(sessionId),
-      isError: sdk.is_error === true || (typeof sdk.subtype === 'string' && sdk.subtype !== 'success'),
-      durationMs: Number.isFinite(sdk.duration_ms) ? sdk.duration_ms : 0,
-      text: attentionText(sdk.result),
+  _turnEnded(comms, channelId, sessionId, sdk) {
+    const noTurn = sdk.num_turns === 0 && isRecord(sdk.origin) && sdk.origin.kind === 'task-notification';
+    if (this._enabled && !noTurn) {
+      this._owed.set(sessionId, {
+        isError: sdk.is_error === true || (typeof sdk.subtype === 'string' && sdk.subtype !== 'success'),
+        durationMs: Number.isFinite(sdk.duration_ms) ? sdk.duration_ms : 0,
+        text: attentionText(sdk.result),
+      });
+    }
+    this._settle(comms, channelId, sessionId);
+  }
+
+  /**
+   * What the CLI's background_tasks_changed lists for the channel: how many tasks the host counts against rest (all
+   * but the ambient ones; a list that is not an array counts as one, as the host has it), and whether one is an
+   * agent or a workflow, ambient or not: what keeps VS Code's dot blue.
+   * @param {any} comms @param {string} channelId @param {unknown} tasks
+   */
+  _noteTasks(comms, channelId, tasks) {
+    const list = Array.isArray(tasks) ? tasks : undefined;
+    let byChannel = this._tasks.get(comms);
+    if (!byChannel) {
+      byChannel = new Map();
+      this._tasks.set(comms, byChannel);
+    }
+    byChannel.set(channelId, {
+      running: list ? list.filter((task) => !isRecord(task) || task.ambient !== true).length : 1,
+      agents: list ? list.some((task) => isRecord(task) && (task.task_type === 'local_agent' || task.task_type === 'local_workflow')) : false,
     });
+  }
+
+  /**
+   * `done`, at a result, once the session it ended a turn in is done: the host is at rest (`atRest`: no turn, nothing
+   * queued, no background task; a host without it goes by the CLI's last task list), no agent or workflow runs, ambient
+   * or not (VS Code's dot would be blue), and no prompt is open (the session waits). A turn that ends while work goes
+   * on in the background says nothing yet. Work that ends is taken up by a turn of the CLI's own (its task
+   * notification), and that turn's result says it, once. The list emptying is not enough: the host is not at rest
+   * after any word from a task until the next result, and a turn may still follow.
+   * @param {any} comms @param {string} channelId @param {string} sessionId
+   */
+  _settle(comms, channelId, sessionId) {
+    const owed = this._owed.get(sessionId);
+    if (!owed) return;
+    const tasks = this._tasks.get(comms)?.get(channelId);
+    const atRest = guard(() => this._channelAt(comms, channelId).atRest);
+    if (typeof atRest === 'boolean' ? !atRest : (tasks?.running ?? 0) > 0) return;
+    if (tasks?.agents === true || this._pendingFor(sessionId).length > 0) return;
+    this._owed.delete(sessionId);
+    this._emitAttention({ kind: 'done', session: sessionId, title: this._titleOf(sessionId), ...owed });
   }
 
   /** A listener that throws is logged; the message it came with goes on. @param {string} name @param {...unknown} args */

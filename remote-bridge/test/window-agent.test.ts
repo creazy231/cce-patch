@@ -951,6 +951,204 @@ describe("attention", () => {
     expect(attention).toEqual([]);
   });
 
+  // A turn that leaves work running in the background ends in a result like any other, and the CLI tells what still
+  // runs in `background_tasks_changed` (shapes from a 2.1.330 CLI's stream). `done` is for a session that is done:
+  // VS Code's dot green, nothing running, nothing open.
+  describe("done waits until the session is done", () => {
+    const dones = (attention: any[]) => attention.filter((ev) => ev.kind === "done");
+    const tasksChanged = (session: string, uuid: string, tasks: Array<Record<string, any>>) => ({ type: "system", subtype: "background_tasks_changed", tasks, uuid, session_id: session });
+    const agentTask = { task_id: "a845c61a5f2d86c55", run_id: "0mwt2afl1-cd8406b0", task_type: "local_agent", subagent_type: "general-purpose", description: "Background sleep-and-echo task" };
+    const shellTask = { task_id: "bad009hyp", run_id: "0mwt29810-c93de79f", task_type: "local_bash", description: "Sleep 8 seconds then echo ready, in background" };
+    const finished = (session: string, task: Record<string, any>, uuid: string) => ({
+      type: "system",
+      subtype: "task_notification",
+      task_id: task.task_id,
+      run_id: task.run_id,
+      status: "completed",
+      summary: `Background command "${task.description}" completed (exit code 0)`,
+      uuid,
+      session_id: session,
+    });
+    const turnEnd = (session: string, uuid: string, text: string, fields: Record<string, any> = {}) => ({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 2344,
+      num_turns: 1,
+      stop_reason: "end_turn",
+      result: text,
+      session_id: session,
+      uuid,
+      ...fields,
+    });
+    /** What the CLI ends a task notification with when it ran no turn for it. */
+    const noTurn = (session: string, uuid: string, runId: string) => ({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 5,
+      num_turns: 0,
+      stop_reason: null,
+      result: "",
+      origin: { kind: "task-notification", producer: "session-task", runId },
+      session_id: session,
+      uuid,
+    });
+
+    test("a turn that ends while a background agent works is not done; the turn after it is, once", async () => {
+      const { sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "launched", { num_turns: 2 }));
+      expect(dones(attention)).toEqual([]); // VS Code's dot is still blue
+
+      sidebar.emit("c1", finished("s1", agentTask, "n-1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-2", []));
+      expect(dones(attention)).toEqual([]);
+      sidebar.emit("c1", init("s1")); // the CLI takes up the agent's report
+      sidebar.emit("c1", turnEnd("s1", "r-2", "complete", { origin: { kind: "peer", from: agentTask.task_id, handback: true } }));
+      expect(dones(attention)).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 2344, text: "complete" }]);
+
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", noTurn("s1", "r-3", agentTask.run_id)); // the agent's notification, with nothing left to do
+      expect(dones(attention)).toHaveLength(1);
+    });
+
+    test("a background shell holds done back until the turn that follows it, though VS Code's dot leaves shells out", async () => {
+      const { sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [shellTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "started", { num_turns: 2 }));
+      sidebar.emit("c1", finished("s1", shellTask, "n-1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-2", [])); // the host stays busy until the next result
+      expect(dones(attention)).toEqual([]);
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-2", "finished", { origin: { kind: "task-notification", producer: "session-task", runId: shellTask.run_id } }));
+      expect(dones(attention)).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 2344, text: "finished" }]);
+    });
+
+    test.each(["local_agent", "local_workflow"])("an ambient %s keeps VS Code's dot blue while the host is at rest: done waits for the result after it", async (taskType) => {
+      const { sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [{ task_id: "f1", run_id: "0mwt-f1", task_type: taskType, description: "/review", ambient: true }]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "forked"));
+      expect(sidebar.channels.get("c1")!.atRest).toBe(true);
+      expect(dones(attention)).toEqual([]);
+      sidebar.emit("c1", tasksChanged("s1", "t-2", [])); // gone, but a turn may still take up its report
+      expect(dones(attention)).toEqual([]);
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-2", "reported"));
+      expect(dones(attention)).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 2344, text: "reported" }]);
+    });
+
+    test("whatever else keeps the host from rest holds done back too (a queued prompt, say)", async () => {
+      const { sidebar, attention } = await listedWindow();
+      let queued = true;
+      Object.defineProperty(sidebar.channels.get("c1")!, "atRest", { get: () => !queued, set: () => {}, configurable: true });
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "first"));
+      expect(dones(attention)).toEqual([]);
+      sidebar.emit("c1", init("s1"));
+      queued = false;
+      sidebar.emit("c1", turnEnd("s1", "r-2", "second", { is_error: true, subtype: "error_during_execution", duration_ms: 9 }));
+      expect(dones(attention)).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: true, durationMs: 9, text: "second" }]);
+    });
+
+    test("without atRest (an older host), the task list decides, at the next result", async () => {
+      const { sidebar, attention } = await listedWindow();
+      Object.defineProperty(sidebar.channels.get("c1")!, "atRest", { get: () => undefined, set: () => {}, configurable: true });
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "plain"));
+      expect(dones(attention)).toHaveLength(1); // nothing in the background: done at once
+
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [shellTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-2", "started"));
+      sidebar.emit("c1", tasksChanged("s1", "t-2", []));
+      expect(dones(attention)).toHaveLength(1);
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-3", "finished"));
+      expect(dones(attention).at(-1)).toMatchObject({ kind: "done", text: "finished" });
+      expect(dones(attention)).toHaveLength(2);
+
+      sidebar.emit("c1", init("s1")); // an ambient task that is not an agent holds nothing back
+      sidebar.emit("c1", tasksChanged("s1", "t-3", [{ task_id: "w1", run_id: "0mwt-w1", task_type: "monitor_ws", description: "watch", ambient: true }]));
+      sidebar.emit("c1", turnEnd("s1", "r-4", "watching"));
+      expect(dones(attention).at(-1)).toMatchObject({ kind: "done", text: "watching" });
+    });
+
+    test("a prompt still open when a turn ends: the session waits, it is not done", async () => {
+      const { agent, sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      const asked = sidebar.requestPermission("c1", dialog);
+      sidebar.emit("c1", turnEnd("s1", "r-1", "over to you"));
+      expect(dones(attention)).toEqual([]);
+      await agent.answer("s1", asked.requestId, { kind: "cancel" });
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", turnEnd("s1", "r-2", "all set"));
+      expect(dones(attention)).toEqual([{ kind: "done", session: "s1", title: "Fix the flaky test", isError: false, durationMs: 2344, text: "all set" }]);
+    });
+
+    test("a channel that closes takes the done it owed with it: the session opened again starts afresh", async () => {
+      const { sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "launched"));
+      sidebar.closeChannel("c1");
+      sidebar.openChannel("c9", "s1");
+      sidebar.emit("c9", init("s1"));
+      sidebar.emit("c9", noTurn("s1", "r-2", agentTask.run_id));
+      expect(dones(attention)).toEqual([]);
+    });
+
+    test("so does a channel the host drops without a word, once the next sweep finds out", async () => {
+      const { agent, sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "launched"));
+      sidebar.channels.delete("c1");
+      await agent.refreshProject();
+      sidebar.openChannel("c9", "s1");
+      sidebar.emit("c9", init("s1"));
+      sidebar.emit("c9", noTurn("s1", "r-2", agentTask.run_id));
+      expect(dones(attention)).toEqual([]);
+    });
+
+    test("a turn that ended while remote access was off, or before it was turned off, says nothing once it is on", async () => {
+      const { agent, sidebar, attention } = await listedWindow();
+      agent.setEnabled(false);
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "while off"));
+      agent.setEnabled(true);
+      sidebar.emit("c1", tasksChanged("s1", "t-2", []));
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", noTurn("s1", "r-2", agentTask.run_id)); // the session is done now, but its turn ended while off
+      expect(dones(attention)).toEqual([]);
+
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-3", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-3", "before off"));
+      agent.setEnabled(false);
+      agent.setEnabled(true);
+      sidebar.emit("c1", tasksChanged("s1", "t-4", []));
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", noTurn("s1", "r-4", agentTask.run_id));
+      expect(dones(attention)).toEqual([]);
+    });
+
+    test("a session that /clear replaces on the channel keeps what it owed to itself", async () => {
+      const { sidebar, attention } = await listedWindow();
+      sidebar.emit("c1", init("s1"));
+      sidebar.emit("c1", tasksChanged("s1", "t-1", [agentTask]));
+      sidebar.emit("c1", turnEnd("s1", "r-1", "launched")); // s1 is not done
+      sidebar.emit("c1", tasksChanged("s1", "t-2", []));
+      sidebar.emit("c1", init("s-new")); // /clear: a new session on the same channel
+      sidebar.emit("c1", turnEnd("s-new", "r-2", "cleared"));
+      expect(dones(attention)).toEqual([expect.objectContaining({ kind: "done", session: "s-new", text: "cleared" })]);
+    });
+  });
+
   test("a prompt on a channel that has no session yet is not announced", () => {
     const { sidebar, attention } = windowWith();
     sidebar.openChannel("c7");
@@ -973,10 +1171,11 @@ describe("attention", () => {
     expect(attention).toEqual([]);
 
     agent.setEnabled(true); // and the events are back
-    const next = tab.requestPermission("c2", bash);
     tab.emit("c2", result("s2"));
-    expect(attention.map((ev) => ev.kind)).toEqual(["open", "waiting", "done"]);
-    expect(attention[1]).toMatchObject({ session: "s2", requestId: next.requestId, title: "Add dark mode" });
+    const next = tab.requestPermission("c2", bash);
+    expect(attention.map((ev) => ev.kind)).toEqual(["done", "open", "waiting"]);
+    expect(attention[0]).toMatchObject({ session: "s2", title: "Add dark mode" });
+    expect(attention[2]).toMatchObject({ session: "s2", requestId: next.requestId, title: "Add dark mode" });
   });
 
   test("replayAttention reports the open prompts", async () => {
@@ -1067,7 +1266,7 @@ describe("attention", () => {
   });
 
   test("the text is cut to 140 characters and an ellipsis, never inside an emoji, and a text of 140 stays whole", async () => {
-    const { sidebar, attention } = await listedWindow();
+    const { sidebar, tab, attention } = await listedWindow();
     const textOf = (inputs: Record<string, unknown>) => {
       attention.length = 0;
       sidebar.requestPermission("c1", { ...bash, inputs });
@@ -1078,8 +1277,8 @@ describe("attention", () => {
     expect(textOf({ command: "z".repeat(141) })).toBe(`${"z".repeat(140)}…`);
     expect(textOf({ command: `${"y".repeat(139)}😀 and more` })).toBe(`${"y".repeat(139)}…`); // the pair would be cut in two
     expect(textOf({ command: `${"y".repeat(138)}😀 and more` })).toBe(`${"y".repeat(138)}😀…`); // the pair fits
-    sidebar.emit("c1", { ...result("s1"), result: "R".repeat(500) });
-    expect(attention.at(-1)).toMatchObject({ kind: "done", text: `${"R".repeat(140)}…` });
+    tab.emit("c2", { ...result("s2"), result: "R".repeat(500) }); // s1 still waits for its prompts: not done
+    expect(attention.at(-1)).toMatchObject({ kind: "done", session: "s2", text: `${"R".repeat(140)}…` });
   });
 
   test("attention titles match the sessions list", async () => {

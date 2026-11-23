@@ -1362,18 +1362,21 @@ describe("attention", () => {
     expect(hubs[0].phoneCount()).toBe(0);
   });
 
-  test("a prompt and a finished turn in a window reach the hub as open, waiting and done, in order", async () => {
+  test("a prompt, its answer and the turn finishing in a window reach the hub as open, waiting, open and done, in order", async () => {
     const { a, b, seen } = await windows();
     for (const [window, name] of [[a, "a"], [b, "b"]] as const) {
       seen.length = 0;
       const asked = window.comms.requestPermission("c1", bash);
+      // VS Code answers it: a turn does not end while its prompt waits
+      await window.comms.fromClient({ type: "response", requestId: asked.requestId, response: { type: "tool_permission_response", result: { behavior: "allow", updatedInput: bash.inputs, updatedPermissions: [] } } });
       window.comms.emit("c1", { type: "result", subtype: "success", is_error: false, duration_ms: 5, result: "ok", session_id: "s1", uuid: `r-${name}` });
-      await until(`the events of window ${name}`, () => seen.length === 3);
-      expect(seen.map((event) => event.ev.kind)).toEqual(["open", "waiting", "done"]);
-      expect(seen.map(projectAndKey)).toEqual(Array(3).fill([window.agent.projectId(), name, "string"]));
+      await until(`the events of window ${name}`, () => seen.length === 4);
+      expect(seen.map((event) => event.ev.kind)).toEqual(["open", "waiting", "open", "done"]);
+      expect(seen.map(projectAndKey)).toEqual(Array(4).fill([window.agent.projectId(), name, "string"]));
       expect(seen[0].ev).toEqual({ kind: "open", session: "s1", requestIds: [asked.requestId] });
       expect(seen[1].ev).toMatchObject({ kind: "waiting", session: "s1", requestId: asked.requestId, title: expect.any(String), prompt: { kind: "tool", toolName: "Bash", text: "npm test" } });
-      expect(seen[2].ev).toMatchObject({ kind: "done", session: "s1", isError: false, durationMs: 5, text: "ok" });
+      expect(seen[2].ev).toEqual({ kind: "open", session: "s1", requestIds: [] });
+      expect(seen[3].ev).toMatchObject({ kind: "done", session: "s1", isError: false, durationMs: 5, text: "ok" });
     }
   });
 
