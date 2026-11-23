@@ -9,7 +9,7 @@ With the phone in the pocket and CCE Remote closed, the user wants to know when 
 ## Goals
 
 - **When Claude waits.** A notification on the iPhone when a session starts waiting for input: a question, a permission prompt, a plan or a dialog. The text names the project and the session and shows the question or the tool.
-- **When a turn ends.** A notification when a turn ends ("Finished: …"). It can be turned off.
+- **When a session is done.** A notification when a session is done ("Finished: …"): its last turn ended and nothing runs on in the background, is queued or waits. It can be turned off.
 - **Opening.** Tapping a notification opens the app on that session.
 - **Badge.** The app's home-screen badge counts the sessions that wait, summed over the paired Macs.
 - **Reach.** It works with several paired Macs and with the app closed or suspended. The phone needn't be on the tailnet to receive one; only opening the session needs the tailnet.
@@ -95,7 +95,11 @@ These are emitted like the other events, only while remote access is on.
   - It is cut to 140 characters.
   - **Never announced.** A prompt that appeared while remote access was off, or while no hub listened, is announced as `waiting` when a hub starts listening (`replayAttention`); one already announced to a hub is only counted.
 - **`{kind: 'open', session, requestIds}`** fires whenever the list of a session's open prompts changes. `requestIds` is the list as it is now, often empty once answered here or on the phone.
-- **`{kind: 'done', session, title, isError, durationMs, text}`** fires when a `result` ends a turn. `text` is the start of the result text (140 characters).
+- **`{kind: 'done', session, title, isError, durationMs, text}`** fires once a session is done, with its last turn's `result`. `text` is the start of the result text (140 characters).
+  - A turn that ends while work goes on in the background (subagents, workflows, shells, a queued prompt) ends in a `result` too. The agent keeps what that result says and fires when the session is done: the host's `atRest` is true for the channel, the CLI's last `background_tasks_changed` lists no `local_agent` or `local_workflow` task (ambient or not: those keep VS Code's dot blue), and no prompt is open. That is checked at every `result`, and only there: after any word from a task (`system/task_*`) the host isn't at rest again before the next `result`, and work that ends is taken up by a turn of the CLI's own (its task notification), whose `result` says it.
+  - A host without `atRest` goes by the task list's non-ambient tasks, at results only.
+  - The `result` the CLI ends a task notification with when it ran no turn (`num_turns: 0`, `origin.kind: 'task-notification'`) keeps nothing; the host doesn't count it as a turn either.
+  - A closed channel, and remote access turned off, drop what was kept.
 
 #### Coordinator and hub plumbing
 
@@ -234,7 +238,7 @@ A paired device with `push` shows "notifications on".
 - **agent:**
   - `waiting` once per requestId with the text for each prompt kind;
   - `open` after an answer and after a closed channel;
-  - `done` on a result;
+  - `done` once the session is done: not while background work, a queued prompt or an open prompt holds it; then once, with the last turn's result; nothing for a task notification that ran no turn;
   - nothing while remote access is off.
 - **coordinator/hub plumbing:** attention from the hub's own window and from a peer reaches the hub with no phone connected.
 - **notifier and hub:**
@@ -267,3 +271,5 @@ A paired device with `push` shows "notifications on".
 - **Phone-owned VAPID keys.** The phone owns the VAPID keys and gives the private key to its paired Macs. It is stored 0600 in `state.json`, like the device token hashes. It only allows pushing to this phone.
 - **`sub`.** It is the app's own origin, so no email address is needed.
 - **Badge counts.** The badge sums per-Mac counts. A count can stay high until the next notification or until the app opens, since iOS allows no silent pushes.
+- **"Finished" means done (changed 2026-11-23).** The user asked for "Finished" only once a session is really done (VS Code's dot green), not while it is still blue and something runs in the background. A `done` went out for every `result`, so a turn that left subagents or a workflow running announced "Finished" while the dot was still blue, and again for each turn that followed. Now only a session that is done sends one.
+- **Background shells hold "Finished" back too (our call, open to the user).** VS Code's dot leaves shells out, but a shell Claude waits on (a long build or test run) and one left running (a dev server) look the same in the CLI's task list. We hold the push while any shell runs, as the host's `atRest` and the phone's "Running" do. The cost: a session that leaves a dev server running sends no "Finished" until the server stops. The alternative is to follow VS Code's dot, which sends a "Finished" while Claude still waits on a shell.
