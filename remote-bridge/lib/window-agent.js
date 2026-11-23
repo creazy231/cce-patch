@@ -42,6 +42,10 @@
 // small things a phone needs the moment remote access is turned on (prompts, turns, background tasks,
 // which channel holds which session), and answers the Connection tab.
 //
+// With the Connection tab's "Claude in Chrome" switch on (`chromeAutoAccept`, which bridge.js points at
+// the coordinator), the agent also answers Claude in Chrome's permission prompts itself, as VS Code's
+// "Allow" would, whether remote access is on or off: VS Code never shows them (_autoAcceptChrome).
+//
 // State is kept in memory only, and bounded: AGENT_LIMITS.
 
 const crypto = require('crypto');
@@ -107,6 +111,9 @@ const INJECTED_ID_PREFIX = 'cce-remote-';
 /** The usage relay's `merged` before the agent first looked at it. */
 const UNSEEN = Symbol('unseen');
 const CCE_REQUEST_PREFIX = 'cce_remote_';
+// Claude in Chrome's tools (the MCP server Claude Code adds for it), and the rule that allows it a site.
+const CHROME_TOOL_PREFIX = 'mcp__claude-in-chrome__';
+const CHROME_SITE_RULE = 'ClaudeInChromeDomain';
 const OPEN_EDITOR = 'claude-vscode.editor.open';
 // editor.open's options (its sixth argument): an open a program asks for, as VS Code's own session list does.
 // Without them the extension takes the open for the user's choice and saves "panel" as their preferred location
@@ -188,6 +195,42 @@ function errorText(error) {
   } catch {
     return 'unprintable error';
   }
+}
+
+/** @param {unknown} rule  one rule of an `addRules` suggestion */
+function isChromeRule(rule) {
+  if (!isRecord(rule)) return false;
+  if (rule.toolName === CHROME_SITE_RULE) return isText(rule.ruleContent); // one site; without one it could be every site
+  return isText(rule.toolName) && rule.toolName.startsWith(CHROME_TOOL_PREFIX);
+}
+
+/**
+ * Whether the "always" of a Claude in Chrome prompt does nothing but allow Claude in Chrome for this session:
+ * VS Code offers it, and every suggestion adds allow rules for the session, each for a site or one of Claude
+ * in Chrome's tools. The site card's "always allow this site" is such a suggestion.
+ * @param {import('./answers.js').Pending} pending
+ */
+function chromeOnlyForSession(pending) {
+  if (!pending.canAlwaysAllow || pending.suggestions.length === 0) return false;
+  return pending.suggestions.every(
+    (suggestion) =>
+      isRecord(suggestion) &&
+      suggestion.type === 'addRules' &&
+      suggestion.behavior === 'allow' &&
+      suggestion.destination === 'session' &&
+      Array.isArray(suggestion.rules) &&
+      suggestion.rules.length > 0 &&
+      suggestion.rules.every(isChromeRule),
+  );
+}
+
+/** The site a suggestion allows, for the log. @param {any[]} suggestions */
+function chromeSiteOf(suggestions) {
+  for (const suggestion of suggestions) {
+    const rule = isRecord(suggestion) && Array.isArray(suggestion.rules) ? suggestion.rules.find((r) => isRecord(r) && r.toolName === CHROME_SITE_RULE) : undefined;
+    if (rule && isText(rule.ruleContent)) return rule.ruleContent.slice(0, 200);
+  }
+  return undefined;
 }
 
 /**
@@ -538,6 +581,12 @@ class WindowAgent extends EventEmitter {
      * @type {((comms: any, request: any) => Promise<object>) | null}
      */
     this.onCceRequest = null;
+    /**
+     * Whether Claude in Chrome's permission prompts are answered for the user (the Connection tab's switch):
+     * read as each one comes, and only `true` counts. bridge.js points it at the coordinator.
+     * @type {(() => unknown) | null}
+     */
+    this.chromeAutoAccept = null;
 
     /** @type {WeakMap<object, { send?: Function, fromClient?: Function, processRequest?: Function }>} the unwrapped methods */
     this._originals = new WeakMap();
@@ -796,6 +845,7 @@ class WindowAgent extends EventEmitter {
           this._lookAtUsage(); // the usage meter's numbers, sent to every webview: not a prompt
           return false;
         }
+        if (this._autoAcceptChrome(comms, message)) return true; // answered for the user: VS Code never shows it
         this._onRequest(comms, message);
         return false;
       case 'cancel_request': // the CLI withdrew the prompt
@@ -869,6 +919,83 @@ class WindowAgent extends EventEmitter {
       this._emitWaiting(sessionId, pending);
     }
     this._changed();
+  }
+
+  /**
+   * A Claude in Chrome prompt while the switch is on: answered as VS Code's "Allow" would answer it, and
+   * swallowed, so neither VS Code nor the phone shows it. The answer goes out on the next microtask, once
+   * the host's send is over (the host waits for it from before it sends). It is the prompt's "always" when
+   * that does nothing but allow Claude in Chrome for this session (the site card's "always allow this
+   * site": a site then asks once a session), else a plain allow, which writes no settings file and
+   * changes no mode. When the answer cannot go out, VS Code and the phone get the prompt after all.
+   * @param {any} comms
+   * @param {Record<string, any>} message  `{type:'request', channelId, requestId, request}`
+   * @returns {boolean} true when the agent answers it
+   */
+  _autoAcceptChrome(comms, message) {
+    const request = message.request;
+    if (!isRecord(request) || request.type !== 'tool_permission_request') return false;
+    if (!isText(request.toolName) || !request.toolName.startsWith(CHROME_TOOL_PREFIX)) return false;
+    if (!this._chromeAutoAcceptOn()) return false;
+    const pending = classifyPending(message, this.now());
+    if (!pending || pending.kind !== 'tool') return false;
+    const always = chromeOnlyForSession(pending);
+    const { response, mode } = buildAnswer(pending, { kind: always ? 'allowAlways' : 'allow' }, { autoMode: false });
+    if (mode) return false; // a mode change is never the switch's to make (chromeOnlyForSession takes rules only)
+    const { requestId, toolName } = pending;
+    const site = always ? chromeSiteOf(pending.suggestions) : undefined;
+    const answered = () => this._say(`window agent: Claude in Chrome auto-accept allowed ${toolName}${site ? ` and ${site} for the session` : ''}`);
+    const failed = (/** @type {unknown} */ error) => {
+      this._say(`window agent: could not answer a Claude in Chrome prompt (${errorText(error)}); VS Code asks instead`);
+      this._showAfterAll(comms, message);
+    };
+    queueMicrotask(() => {
+      try {
+        let queued;
+        try {
+          queued = this._inject(comms, { type: 'response', requestId, response });
+        } catch (error) {
+          failed(error);
+          return;
+        }
+        if (isRecord(queued) && typeof queued.then === 'function') queued.then(answered, failed);
+        else answered();
+      } catch (error) {
+        this._failed(error);
+      }
+    });
+    return true;
+  }
+
+  /** Whether the Claude in Chrome switch is on: only `true` counts, and a getter that throws is off. */
+  _chromeAutoAcceptOn() {
+    const on = this.chromeAutoAccept;
+    if (typeof on !== 'function') return false;
+    try {
+      return on() === true;
+    } catch (error) {
+      this._failed(error);
+      return false;
+    }
+  }
+
+  /**
+   * A prompt the agent took but could not answer: VS Code gets it (the original send), and the phone too.
+   * @param {any} comms
+   * @param {Record<string, any>} message
+   */
+  _showAfterAll(comms, message) {
+    try {
+      this._post(comms, message);
+    } catch (error) {
+      this._failed(error);
+    }
+    try {
+      this._onRequest(comms, message);
+      this._notify();
+    } catch (error) {
+      this._failed(error);
+    }
   }
 
   /** The channel is gone, and so are its prompts. @param {any} comms @param {unknown} channelId */
@@ -1933,12 +2060,19 @@ class WindowAgent extends EventEmitter {
 
   // ---- injection ------------------------------------------------------------------------------------------
 
-  /** Webview -> host, through the original fromClient, so the agent does not observe it. @param {any} comms @param {Record<string, any>} message */
+  /**
+   * Webview -> host, through the original fromClient, so the agent does not observe it. Returns what
+   * fromClient returned (a failure it rejects with is logged).
+   * @param {any} comms
+   * @param {Record<string, any>} message
+   * @returns {unknown}
+   */
   _inject(comms, message) {
     const original = this._originals.get(comms)?.fromClient ?? guard(() => comms.fromClient);
     if (typeof original !== 'function') throw codeError('not_supported');
     const queued = original.call(comms, message);
     if (queued && typeof queued.then === 'function') queued.then(undefined, (/** @type {unknown} */ error) => this._failed(error));
+    return queued;
   }
 
   /** Host -> webview, through the original send. @param {any} comms @param {Record<string, any>} message */

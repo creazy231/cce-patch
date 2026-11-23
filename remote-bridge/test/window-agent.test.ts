@@ -2403,3 +2403,182 @@ describe("commands", () => {
     expect((await agent.commands()).map((c) => c.name)).toEqual(["deploy", "ops:deploy"]);
   });
 });
+
+// ---- Claude in Chrome auto-accept (the Connection tab's switch) --------------------------------------
+
+// A tool prompt for one of Claude in Chrome's tools; its "always" would write the project's local settings.
+const chromeNavigate = {
+  type: "tool_permission_request",
+  toolName: "mcp__claude-in-chrome__navigate",
+  inputs: { url: "https://example.com/docs", tabId: 7 },
+  suggestions: [{ type: "addRules", rules: [{ toolName: "mcp__claude-in-chrome__navigate" }], behavior: "allow", destination: "localSettings" }],
+  toolUseId: "toolu_05",
+  defaultToNo: false,
+  suppressAlwaysAllowRule: false,
+};
+// The site card: Chrome's extension wants the site approved; "always" allows the site for this session.
+const siteForSession = { type: "addRules", rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "example.com" }], behavior: "allow", destination: "session" };
+const chromeSite = {
+  ...chromeNavigate,
+  toolName: "mcp__claude-in-chrome__computer",
+  inputs: { action: "left_click", coordinate: [10, 20], tabId: 7 },
+  suggestions: [siteForSession],
+  reason: "Claude in Chrome action on example.com",
+  toolUseId: "toolu_06",
+};
+const allowOnce = (request: { inputs: object }) => ({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: request.inputs, updatedPermissions: [] } });
+const reachedVsCode = (comms: FakeComms, requestId: string) => comms.sent.some((message) => message.type === "request" && message.requestId === requestId);
+
+describe("Claude in Chrome auto-accept", () => {
+  test("on: a Claude in Chrome tool prompt gets a plain allow; neither VS Code nor the phone sees it", async () => {
+    const { agent, sidebar, events, attention, logs } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const asked = sidebar.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(false);
+    expect(await asked).toEqual(allowOnce(chromeNavigate));
+    expect(sidebar.received).toEqual([{ type: "response", requestId: asked.requestId, response: allowOnce(chromeNavigate) }]);
+    expect(pendingEvents(events)).toEqual([]);
+    expect(attention).toEqual([]);
+    expect(logs.filter((line) => line.includes("Claude in Chrome"))).toEqual(["window agent: Claude in Chrome auto-accept allowed mcp__claude-in-chrome__navigate"]);
+    await sidebar.flush();
+    expect(sidebar.logger.lines.filter((line) => line.includes("No handler"))).toEqual([]);
+  });
+
+  test("on: the site card is answered with its always, so the site is allowed for the rest of the session", async () => {
+    const { agent, sidebar, events, logs } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const asked = sidebar.requestPermission("c1", chromeSite);
+    expect(await asked).toEqual({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: chromeSite.inputs, updatedPermissions: [siteForSession] } });
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(false);
+    expect(pendingEvents(events)).toEqual([]);
+    expect(logs).toContain("window agent: Claude in Chrome auto-accept allowed mcp__claude-in-chrome__computer and example.com for the session");
+  });
+
+  test("on: an always that allows one of Claude in Chrome's tools for the session is taken too", async () => {
+    const { agent, sidebar } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const toolForSession = { type: "addRules", rules: [{ toolName: "mcp__claude-in-chrome__navigate" }, { toolName: "ClaudeInChromeDomain", ruleContent: "example.org" }], behavior: "allow", destination: "session" };
+    const asked = sidebar.requestPermission("c1", { ...chromeNavigate, suggestions: [toolForSession] });
+    expect(await asked).toEqual({ type: "tool_permission_response", result: { behavior: "allow", updatedInput: chromeNavigate.inputs, updatedPermissions: [toolForSession] } });
+  });
+
+  test("an always that does more than allow Claude in Chrome for the session gives way to a plain allow", async () => {
+    const { agent, sidebar } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const variants: Array<Record<string, any>> = [
+      { suggestions: [siteForSession, { type: "setMode", mode: "acceptEdits", destination: "session" }] },
+      { suggestions: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "rm -rf:*" }], behavior: "allow", destination: "session" }] },
+      { suggestions: [{ ...siteForSession, rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "example.com" }, { toolName: "Bash" }] }] },
+      { suggestions: [{ ...siteForSession, rules: [{ toolName: "ClaudeInChromeDomain" }] }] },
+      { suggestions: [{ ...siteForSession, rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "" }] }] },
+      { suggestions: [{ ...siteForSession, rules: [] }] },
+      { suggestions: [{ ...siteForSession, behavior: "deny" }] },
+      { suggestions: [{ ...siteForSession, destination: "userSettings" }] },
+      { suggestions: [{ ...siteForSession, type: "replaceRules" }] },
+      { suggestions: [null] },
+      { suppressAlwaysAllowRule: true },
+      { plugin: "browser-tools" },
+    ];
+    for (const variant of variants) {
+      const request = { ...chromeSite, ...variant };
+      const asked = sidebar.requestPermission("c1", request);
+      expect({ variant, answer: await asked }).toEqual({ variant, answer: allowOnce(request) });
+    }
+  });
+
+  test("off: without the switch, with it off, or with one that fails, the prompt reaches VS Code and the phone as before", async () => {
+    const switches: Array<(() => unknown) | null | undefined> = [
+      undefined,
+      null,
+      () => false,
+      () => "yes",
+      () => {
+        throw new Error("the state file is gone");
+      },
+    ];
+    for (const chromeAutoAccept of switches) {
+      const { agent, sidebar, events } = windowWith();
+      if (chromeAutoAccept !== undefined) (agent as any).chromeAutoAccept = chromeAutoAccept;
+      const asked = sidebar.requestPermission("c1", chromeSite);
+      expect(reachedVsCode(sidebar, asked.requestId)).toBe(true);
+      await sidebar.flush();
+      expect(sidebar.received).toEqual([]);
+      expect(pendingEvents(events).at(-1)?.[1].pending.map((p: any) => p.requestId)).toEqual([asked.requestId]);
+    }
+  });
+
+  test("on: every other prompt is left alone", async () => {
+    const { agent, sidebar, tab, events } = windowWith();
+    agent.chromeAutoAccept = () => true;
+    const others = [
+      bash,
+      edit,
+      plan,
+      { ...chromeNavigate, toolName: "mcp__claude-in-chrome-x__navigate" },
+      { ...chromeNavigate, toolName: "mcp__claude-in-chrome" },
+      { ...chromeNavigate, toolName: "Mcp__claude-in-chrome__navigate" },
+      { ...chromeNavigate, type: undefined },
+      { type: "tool_permission_request", toolName: "AskUserQuestion", inputs: { questions: [{ question: "Which?", options: [] }] }, suggestions: [] },
+    ];
+    const asked = others.map((request) => sidebar.requestPermission("c1", request));
+    const dialogAsked = tab.requestPermission("c2", dialog);
+    for (const one of asked) expect(reachedVsCode(sidebar, one.requestId)).toBe(true);
+    expect(reachedVsCode(tab, dialogAsked.requestId)).toBe(true);
+    await sidebar.flush();
+    expect(sidebar.received).toEqual([]);
+    expect(tab.received).toEqual([]);
+    const pendingIds = (session: string) => pendingEvents(events).filter(([s]) => s === session).at(-1)?.[1].pending.map((p: any) => p.requestId);
+    expect(pendingIds("s1")).toEqual(asked.map((one) => one.requestId));
+    expect(pendingIds("s2")).toEqual([dialogAsked.requestId]);
+  });
+
+  test("the switch is read as each prompt comes: turned off, the next one is VS Code's again", async () => {
+    let on = true;
+    const { agent, sidebar } = windowWith();
+    agent.chromeAutoAccept = () => on;
+    const first = sidebar.requestPermission("c1", chromeNavigate);
+    expect(await first).toEqual(allowOnce(chromeNavigate));
+    on = false;
+    const second = sidebar.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(sidebar, second.requestId)).toBe(true);
+    on = true;
+    const third = sidebar.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(sidebar, third.requestId)).toBe(false);
+    expect(await third).toEqual(allowOnce(chromeNavigate));
+  });
+
+  test("an answer that can't go out: the prompt reaches VS Code and the phone after all", async () => {
+    const { agent, sidebar, events, logs } = windowWith({
+      before: ({ sidebar }) => {
+        const fromClient = sidebar.fromClient.bind(sidebar);
+        (sidebar as any).fromClient = (message: Message) => {
+          if (message.type === "response") throw new Error("the host went away");
+          return fromClient(message);
+        };
+      },
+    });
+    agent.chromeAutoAccept = () => true;
+    const asked = sidebar.requestPermission("c1", chromeNavigate);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(false);
+    await sleep(0);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(true);
+    expect(pendingEvents(events).at(-1)?.[1].pending.map((p: any) => p.requestId)).toEqual([asked.requestId]);
+    expect(logs.some((line) => line.includes("could not answer a Claude in Chrome prompt") && line.includes("the host went away"))).toBe(true);
+  });
+
+  test("an answer the host rejects: the prompt reaches VS Code and the phone after all", async () => {
+    const { agent, sidebar, events, logs } = windowWith({
+      before: ({ sidebar }) => {
+        const fromClient = sidebar.fromClient.bind(sidebar);
+        (sidebar as any).fromClient = (message: Message) => (message.type === "response" ? Promise.reject(new Error("the reader stopped")) : fromClient(message));
+      },
+    });
+    agent.chromeAutoAccept = () => true;
+    const asked = sidebar.requestPermission("c1", chromeNavigate);
+    await sleep(0);
+    expect(reachedVsCode(sidebar, asked.requestId)).toBe(true);
+    expect(pendingEvents(events).at(-1)?.[1].pending.map((p: any) => p.requestId)).toEqual([asked.requestId]);
+    expect(logs.some((line) => line.includes("could not answer a Claude in Chrome prompt") && line.includes("the reader stopped"))).toBe(true);
+    expect(logs.some((line) => line.includes("auto-accept allowed"))).toBe(false);
+  });
+});
