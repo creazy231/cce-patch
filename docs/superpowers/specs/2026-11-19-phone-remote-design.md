@@ -660,11 +660,17 @@ Hooks in `webview/index.js` (`patchWebviewConnection`), each verified:
     on) 2) Add Mac → scan, or paste the link.
   - Phone app address: a text field + Save (`appUrl`, used in the QR link).
   - Paired devices: name · paired date · last seen, with a remove button.
+  - Claude in Chrome (added 2026-11-23, see
+    `2026-11-23-chrome-auto-accept-design.md`): "Auto-accept is on/off", and
+    **Turn on auto-accept** / **Turn off auto-accept**, with a hint that names
+    the risk. Shown whenever the status carries `chromeAutoAccept`, with remote
+    access on or off.
   - Errors in a red notice (port in use by something else, serve failed, …).
 - Requests (`cce_remote_*`, answered by the bridge in that window; a peer forwards
   hub-owned ones): `status`, `connect`, `disconnect`, `new_code`, `remove_device
-  {id}`, `set_app_url {url}`, `open_tailscale`. Links use the existing `open_url`
-  request.
+  {id}`, `set_app_url {url}`, `set_chrome_auto_accept {on}`, `open_tailscale`.
+  `set_chrome_auto_accept` is written by the window itself, never through the hub,
+  and no phone frame carries it. Links use the existing `open_url` request.
 
 ### Web app (`remote-app/`, "CCE Remote")
 
