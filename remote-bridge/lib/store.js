@@ -23,7 +23,8 @@ const MAX_ROUNDS = 5;
 
 /**
  * @typedef {{ id: string, name: string, tokenHash: string, origin: string, createdAt: number, lastSeenAt: number }} Device
- * @typedef {{ version: number, enabled: boolean, port: number, secret: string, appUrl: string, devices: Device[], [key: string]: unknown }} State
+ * `chromeAutoAccept`: the Connection tab's Claude in Chrome switch; only `true` is on, and no repair adds it.
+ * @typedef {{ version: number, enabled: boolean, port: number, secret: string, appUrl: string, devices: Device[], chromeAutoAccept?: unknown, [key: string]: unknown }} State
  * @typedef {Record<string, string | undefined>} Env
  */
 

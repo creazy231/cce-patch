@@ -1493,3 +1493,106 @@ describe("usage", () => {
     expect(hub.usageFrame()).toEqual({ t: "usage", state: "ok", week: { percent: 30 }, at: 5_000 });
   });
 });
+
+describe("the Claude in Chrome switch", () => {
+  test("off without a state file; on writes the file and this window follows at once, remote access still off", async () => {
+    const env = tempEnv(await freePort());
+    const { coordinator, logs } = makeCoordinator(env);
+    coordinator.start();
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+    expect((await coordinator.status()).chromeAutoAccept).toBe(false);
+    expect(fs.existsSync(statePath(env))).toBe(false);
+
+    await coordinator.setChromeAutoAccept(true);
+    expect(coordinator.chromeAutoAccept()).toBe(true);
+    expect(loadState(env)).toMatchObject({ enabled: false, chromeAutoAccept: true });
+    expect(await coordinator.status()).toMatchObject({ enabled: false, role: "off", chromeAutoAccept: true });
+    expect(logs).toContain("Claude in Chrome auto-accept was turned on");
+
+    await coordinator.setChromeAutoAccept(false);
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+    expect(loadState(env).chromeAutoAccept).toBe(false);
+    expect((await coordinator.status()).chromeAutoAccept).toBe(false);
+    expect(logs).toContain("Claude in Chrome auto-accept was turned off");
+  });
+
+  test("anything but true or false is refused with bad_value, and nothing is written", async () => {
+    const env = tempEnv(await freePort());
+    const { coordinator } = makeCoordinator(env);
+    coordinator.start();
+    for (const value of ["true", 1, null, undefined, {}]) await expect(coordinator.setChromeAutoAccept(value)).rejects.toThrow("bad_value");
+    expect(fs.existsSync(statePath(env))).toBe(false);
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+  });
+
+  test("read from the file at start, where only true counts; off before start and after stop", async () => {
+    const env = tempEnv(await freePort());
+    updateState((state) => {
+      state.chromeAutoAccept = true;
+    }, env);
+    const { coordinator } = makeCoordinator(env);
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+    coordinator.start();
+    expect(coordinator.chromeAutoAccept()).toBe(true);
+    await coordinator.stop();
+    expect(coordinator.chromeAutoAccept()).toBe(false); // a window that closes answers nothing any more
+
+    const other = tempEnv(await freePort());
+    updateState((state) => {
+      state.chromeAutoAccept = "yes";
+    }, other);
+    const second = makeCoordinator(other).coordinator;
+    second.start();
+    expect(second.chromeAutoAccept()).toBe(false);
+    expect((await second.status()).chromeAutoAccept).toBe(false);
+  });
+
+  test("another window's change reaches this one through the state file", async () => {
+    const env = tempEnv(await freePort());
+    const { coordinator } = makeCoordinator(env);
+    coordinator.start();
+    updateState((state) => {
+      state.chromeAutoAccept = true;
+    }, env);
+    await until("the switch on", () => coordinator.chromeAutoAccept());
+    updateState((state) => {
+      state.chromeAutoAccept = false;
+    }, env);
+    await until("the switch off", () => !coordinator.chromeAutoAccept());
+  });
+
+  test("a file that can't be read keeps what was read last; a missing one is off", async () => {
+    const env = tempEnv(await freePort());
+    updateState((state) => {
+      state.chromeAutoAccept = true;
+    }, env);
+    const { coordinator } = makeCoordinator(env);
+    coordinator.start();
+    fs.chmodSync(statePath(env), 0o000);
+    try {
+      expect((await coordinator.status()).chromeAutoAccept).toBe(true);
+      expect(coordinator.chromeAutoAccept()).toBe(true);
+    } finally {
+      fs.chmodSync(statePath(env), 0o600);
+    }
+    fs.rmSync(statePath(env));
+    expect((await coordinator.status()).chromeAutoAccept).toBe(false);
+    expect(coordinator.chromeAutoAccept()).toBe(false);
+  });
+
+  test("turning it on or off while this window serves the phone restarts nothing", async () => {
+    const env = tempEnv(await freePort());
+    const { coordinator, logs } = makeCoordinator(env);
+    coordinator.start();
+    await coordinator.connect();
+    expect(coordinator.role).toBe("hub");
+    const before = logs.length;
+    await coordinator.setChromeAutoAccept(true);
+    await sleep(200); // the watcher has seen the new file
+    await coordinator.setChromeAutoAccept(false);
+    await sleep(200);
+    expect(coordinator.role).toBe("hub");
+    expect(loadState(env).enabled).toBe(true);
+    expect(logs.slice(before)).toEqual(["Claude in Chrome auto-accept was turned on", "Claude in Chrome auto-accept was turned off"]);
+  });
+});
