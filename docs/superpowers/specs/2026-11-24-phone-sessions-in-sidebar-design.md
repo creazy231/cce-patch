@@ -62,7 +62,7 @@ The user asked: "when opening a new session from the web app, it opens a new tab
   - an older session woken in the sidebar;
   - the unchanged tab and sidebar cases;
   - a host without `activateInSidebar`.
-- **End to end:** an isolated Insiders with the patched 2.1.330 (the recipe in CLAUDE.md), sending through the window agent. A sidebar that hadn't started and one that had both showed the new session with the prompt answered, and no editor tab opened.
+- **End to end:** an isolated Insiders with the patched 2.1.330 (the recipe in CLAUDE.md), sending through the window agent, with the final code. A sidebar that hadn't started and one that had both showed the new session with the prompt answered, and no editor tab opened. A session whose Claude process had been stopped, shown nowhere, was resumed in the sidebar by the next message (a launch with `resume`), and that message was answered.
 
 ## Decisions after the end-to-end check
 
