@@ -238,11 +238,6 @@ export class FakeComms {
   configLoads = 0;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
-  /**
-   * Settles when the webview's page has started and said hello (the host's `clientReady`). Resolved here; a test
-   * that models a page still loading puts its own promise here before the comms joins `allComms`.
-   */
-  clientReady: Promise<void> = Promise.resolve();
   private readerDead = false;
   private readonly histories = new Map<string, Message[]>();
   private readonly launchCwds = new Map<string, string>();
@@ -964,11 +959,6 @@ export interface FakeProvider {
   /** Whether the sidebar shows the session or has a channel on it (the host's `sidebarHoldsSession`); false unless a test says otherwise. */
   sidebarHoldsSession(sessionId: string): boolean;
   /**
-   * The comms of the sidebar's webview once VS Code resolved it (the host sets it when the view comes up and clears it
-   * when the view goes). Absent: no sidebar webview yet, or a host without the field.
-   */
-  sidebarComms?: FakeComms;
-  /**
    * Hands a session (or a new one, `sessionId` undefined) to the sidebar's webview: the host's `activateInSidebar`,
    * which `editor.open` uses for `honor-preferred-location` when the user keeps Claude Code in the sidebar (2.1.328+).
    * Absent: an older host, whose `editor.open` always opens a tab.
@@ -1061,8 +1051,6 @@ export interface FakeVscode {
   };
   /** The user's settings by full key (`"claudeCode.preferredLocation"`); a test may change them at any time. */
   settings: Record<string, unknown>;
-  /** VS Code's version (`vscode.version`). */
-  version: string;
   env: { appName: string };
   commands: {
     executeCommand(id: string, ...args: any[]): Promise<any>;
@@ -1080,8 +1068,7 @@ export function createFakeVscode({
   appName = "Visual Studio Code - Insiders",
   name = "demo",
   settings = {},
-  version = "1.107.0",
-}: { folders?: string[]; appName?: string; name?: string | null; settings?: Record<string, unknown>; version?: string } = {}): FakeVscode {
+}: { folders?: string[]; appName?: string; name?: string | null; settings?: Record<string, unknown> } = {}): FakeVscode {
   const userSettings: Record<string, unknown> = { ...settings };
   const toFolders = (paths: string[]): FakeWorkspaceFolder[] =>
     paths.map((path, index) => ({ uri: { scheme: "file", path, fsPath: path, toString: () => `file://${path}` }, name: basename(path), index }));
@@ -1122,7 +1109,6 @@ export function createFakeVscode({
   return {
     workspace,
     settings: userSettings,
-    version,
     env: { appName },
     commands,
     get onCommand() {

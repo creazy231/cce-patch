@@ -123,9 +123,6 @@ const OPEN_EDITOR = 'claude-vscode.editor.open';
 const PIN_TO_PANEL = Object.freeze({ programmatic: 'pin-to-panel' });
 /** Where the user keeps Claude Code (`claudeCode.preferredLocation`): the sidebar or an editor tab. Phone sessions open this way. */
 const HONOR_LOCATION = Object.freeze({ programmatic: 'honor-preferred-location' });
-// What editor.open runs to show the sidebar (the extension's own choice): the secondary sidebar's view from VS Code 1.106 on.
-const SIDEBAR_FOCUS = 'claudeVSCodeSidebar.focus';
-const SECONDARY_SIDEBAR_FOCUS = 'claudeVSCodeSidebarSecondary.focus';
 
 const AGENT_LIMITS = Object.freeze({
   liveMessages: 500, // live (non-stream) messages kept per session, for snapshots
@@ -142,7 +139,9 @@ const AGENT_LIMITS = Object.freeze({
   imageChars: 5 * 1024 * 1024, // base64 characters of one image
   hostReadMs: 10_000, // how long a transcript or session list read of the host may take
   usageReadMs: 15_000, // how long refreshUsage() waits for a usage read through a Claude process
-  sidebarStartupMs: 3_000, // how long a sidebar whose page just got ready gets to start its start-up chat's Claude process
+  // How long a new channel in the sidebar must stay the newest before send(null) takes it. A sidebar that is still
+  // booting launches its start-up chat right before the new session and closes it a moment later (51 ms in 2.1.330).
+  sidebarSettleMs: 500,
 });
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -566,16 +565,15 @@ class WindowAgent extends EventEmitter {
   /**
    * @param {{ provider?: any, vscode?: any, log?: (line: string) => void, now?: () => number,
    *   channelWaitMs?: number, wakeWaitMs?: number, refreshEveryMs?: number, refreshDelayMs?: number, hostReadMs?: number,
-   *   usageReadMs?: number, sidebarStartupMs?: number }} [options]
+   *   usageReadMs?: number, sidebarSettleMs?: number }} [options]
    *   provider: the extension's webview provider (`allComms`, `sessionStates`, `unreadSessionKeys`,
    *   `liveElsewhereSessions`); vscode: the `vscode` module; log: one line of text per call (no
-   *   secrets are ever in it); channelWaitMs: how long send() waits for a channel to open (a sidebar's start
-   *   included), and for a new session to be named; wakeWaitMs: how long it waits for one after opening a session
-   *   that VS Code shows without a Claude Code process; refreshEveryMs / refreshDelayMs: while active, the project
-   *   is refreshed this often, and this long after a change; hostReadMs: how long a transcript or session list read
-   *   may take before the agent goes on without it; usageReadMs: how long refreshUsage() waits for its read;
-   *   sidebarStartupMs: how long a sidebar whose page just got ready gets to start its start-up chat before a new
-   *   session is asked for there.
+   *   secrets are ever in it); channelWaitMs: how long send() waits for a channel to open, and for a new
+   *   session to be named; wakeWaitMs: how long it waits for one after opening a session that VS Code shows
+   *   without a Claude Code process; refreshEveryMs / refreshDelayMs: while active, the project is refreshed this
+   *   often, and this long after a change; hostReadMs: how long a transcript or session list read may take
+   *   before the agent goes on without it; usageReadMs: how long refreshUsage() waits for its read;
+   *   sidebarSettleMs: how long a new session's channel in the sidebar must stay the newest before it is taken.
    */
   constructor({
     provider,
@@ -588,7 +586,7 @@ class WindowAgent extends EventEmitter {
     refreshDelayMs = 1_000,
     hostReadMs = AGENT_LIMITS.hostReadMs,
     usageReadMs = AGENT_LIMITS.usageReadMs,
-    sidebarStartupMs = AGENT_LIMITS.sidebarStartupMs,
+    sidebarSettleMs = AGENT_LIMITS.sidebarSettleMs,
   } = {}) {
     super();
     this.provider = provider;
@@ -601,7 +599,7 @@ class WindowAgent extends EventEmitter {
     this.refreshDelayMs = refreshDelayMs;
     this.hostReadMs = hostReadMs;
     this.usageReadMs = usageReadMs;
-    this.sidebarStartupMs = sidebarStartupMs;
+    this.sidebarSettleMs = sidebarSettleMs;
     /** @type {Set<string>} host reads that took too long once already (each is logged once) */
     this._slowReads = new Set();
     /**
@@ -660,10 +658,8 @@ class WindowAgent extends EventEmitter {
     this._waiters = new Set();
     /** @type {Map<string, { comms: any, channelId: string }>} new channels send(null) has taken */
     this._claimed = new Map();
-    /** @type {WeakMap<object, number>} per comms: when its page was ready (its `clientReady` settled; 0 for a comms without one) */
-    this._readyAt = new WeakMap();
-    /** @type {WeakSet<object>} the comms whose `clientReady` the agent watches */
-    this._readyWatched = new WeakSet();
+    /** @type {WeakMap<object, Set<string>>} per comms: channels that are closing (the webview or the host said so), which the host may still list */
+    this._closing = new WeakMap();
     this._active = false;
     // Remote access is on (the coordinator says): only then are session messages mapped, kept and emitted.
     this._enabled = true;
@@ -786,33 +782,7 @@ class WindowAgent extends EventEmitter {
     } catch (error) {
       this._failed(error);
     }
-    this._watchReady(comms);
     return true;
-  }
-
-  /**
-   * Notes when the comms' page is ready: when its `clientReady` settles (either way), or at once (0) for a comms
-   * without one. Idempotent; instrument() calls it, and _sidebarStarted() for a comms it never saw.
-   * @param {any} comms
-   */
-  _watchReady(comms) {
-    if (typeof comms !== 'object' || comms === null || this._readyWatched.has(comms)) return;
-    this._readyWatched.add(comms);
-    const ready = guard(() => comms.clientReady);
-    if (!ready || typeof ready.then !== 'function') {
-      this._readyAt.set(comms, 0);
-      return;
-    }
-    const note = () => {
-      this._readyAt.set(comms, Date.now());
-      this._notify();
-    };
-    try {
-      ready.then(note, note);
-    } catch (error) {
-      this._failed(error);
-      this._readyAt.set(comms, 0);
-    }
   }
 
   /** @param {any} set */
@@ -1069,9 +1039,16 @@ class WindowAgent extends EventEmitter {
     }
   }
 
-  /** The channel is gone, and so are its prompts. @param {any} comms @param {unknown} channelId */
+  /**
+   * The channel is gone, and so are its prompts. The host may list it a while longer (it reads the webview's
+   * messages one by one, and a launch can hold them up), so it is marked closing: send(null) never takes it.
+   * @param {any} comms @param {unknown} channelId
+   */
   _onChannelClosed(comms, channelId) {
     if (!isText(channelId)) return;
+    let closing = this._closing.get(comms);
+    if (!closing) this._closing.set(comms, (closing = new Set()));
+    closing.add(channelId);
     const sessionId = this._sessionOfChannel(comms, channelId);
     /** @type {Set<string>} */
     const affected = new Set();
@@ -1214,18 +1191,63 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * A channel that is new since `before` and has no session yet: the one a new session opened. It is
+   * Whether the channel could be the one a new session opened: new since `before`, not taken by another send,
+   * not closing, and without a session yet (a session that exists may have been opened meanwhile).
+   * @param {ChannelRef} ref
+   * @param {Set<string>} before
+   */
+  _isNewChannel(ref, before) {
+    if (before.has(ref.key) || this._claimed.has(ref.key)) return false;
+    if (this._closing.get(ref.comms)?.has(ref.channelId)) return false;
+    return !this._sessionOf(ref.comms, ref.channelId, ref.channel);
+  }
+
+  /** Forgets closing channels that the host no longer lists. @param {ChannelRef[]} refs every channel, as _allChannels() gave them */
+  _pruneClosing(refs) {
+    for (const comms of this._commsList()) {
+      const closing = this._closing.get(comms);
+      if (!closing) continue;
+      for (const channelId of closing) if (!refs.some((ref) => ref.comms === comms && ref.channelId === channelId)) closing.delete(channelId);
+    }
+  }
+
+  /** @param {ChannelRef} ref @returns {ChannelRef} */
+  _claim(ref) {
+    this._claimed.set(ref.key, { comms: ref.comms, channelId: ref.channelId });
+    return ref;
+  }
+
+  /**
+   * A channel that is new since `before` and has no session yet: the one a new session opened in a tab. It is
    * taken at once, so two new sessions opened together never share one.
    * @param {Set<string>} before
    */
   _takeNewChannel(before) {
-    for (const ref of this._allChannels()) {
-      if (before.has(ref.key) || this._claimed.has(ref.key)) continue;
-      if (this._sessionOf(ref.comms, ref.channelId, ref.channel)) continue; // a session that exists, opened meanwhile
-      this._claimed.set(ref.key, { comms: ref.comms, channelId: ref.channelId });
-      return ref;
+    const refs = this._allChannels();
+    this._pruneClosing(refs);
+    const ref = refs.find((candidate) => this._isNewChannel(candidate, before));
+    return ref ? this._claim(ref) : undefined;
+  }
+
+  /**
+   * The new session's channel in the sidebar: the newest new channel, once it has stayed the newest for
+   * sidebarSettleMs. A sidebar that is still booting launches its start-up chat right before the new session and
+   * closes it a moment later; the host can list that channel for longer (a folder-trust prompt holds its reads).
+   * @param {Set<string>} before
+   * @param {Map<string, number>} seen  per channel key, when a look first saw it (kept across looks)
+   */
+  _takeSettledNewChannel(before, seen) {
+    const refs = this._allChannels();
+    this._pruneClosing(refs);
+    /** @type {ChannelRef | undefined} */
+    let newest;
+    for (const ref of refs) {
+      if (!this._isNewChannel(ref, before)) continue;
+      if (!seen.has(ref.key)) seen.set(ref.key, Date.now());
+      if (!newest || /** @type {number} */ (seen.get(ref.key)) >= /** @type {number} */ (seen.get(newest.key))) newest = ref;
     }
-    return undefined;
+    if (!newest || Date.now() - /** @type {number} */ (seen.get(newest.key)) < this.sidebarSettleMs) return undefined;
+    return this._claim(newest);
   }
 
   /**
@@ -1954,21 +1976,17 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * Opens a new session where the user keeps Claude Code and sends the prompt into its channel. A sidebar that has
-   * not started is revealed and waited for first, so its start-up chat's channel is known before the open; all of
-   * that and the open's channel share channelWaitMs.
+   * Opens a new session where the user keeps Claude Code and sends the prompt into its channel. In the sidebar
+   * (editor.open reveals it, and holds the session until it is up), the channel is taken once it has settled, so a
+   * booting sidebar's start-up chat is never taken.
    * @param {Record<string, any>} message
    */
   async _sendToNewSession(message) {
-    const deadline = Date.now() + this.channelWaitMs;
-    if (this._opensInSidebar()) await this._startSidebar(deadline);
     const before = new Set(this._allChannels().map((ref) => ref.key));
-    const target = await this._openAndWaitMs(
-      Math.max(0, deadline - Date.now()),
-      () => this._takeNewChannel(before),
-      OPEN_EDITOR,
-      ...editorArgs(undefined, HONOR_LOCATION),
-    );
+    /** @type {Map<string, number>} */
+    const seen = new Map();
+    const find = this._opensInSidebar() ? () => this._takeSettledNewChannel(before, seen) : () => this._takeNewChannel(before);
+    const target = await this._openAndWait(find, OPEN_EDITOR, ...editorArgs(undefined, HONOR_LOCATION));
     this._inject(target.comms, { type: 'io_message', channelId: target.channelId, message, done: false });
     try {
       return { session: await this._waitFor(() => this._namedSession(target), this.channelWaitMs), uuid: message.uuid };
@@ -1989,52 +2007,6 @@ class WindowAgent extends EventEmitter {
   _opensInSidebar() {
     const provider = this.provider;
     return guard(() => typeof provider.activateInSidebar === 'function', false) === true && this._preferredLocation() === 'sidebar';
-  }
-
-  /** The command that reveals the sidebar, chosen as the extension chooses it: the secondary sidebar's from VS Code 1.106 on. */
-  _sidebarFocusCommand() {
-    const [major = 0, minor = 0] = String(guard(() => this.vscode.version, '')).split('.').map(Number);
-    return major > 1 || (major === 1 && minor >= 106) ? SECONDARY_SIDEBAR_FOCUS : SIDEBAR_FOCUS;
-  }
-
-  /** Whether the comms has a channel, running or launching, that no session has named yet. @param {any} comms */
-  _hasUnnamedChannel(comms) {
-    for (const field of ['channels', 'pendingChannels']) {
-      for (const [channelId, channel] of entriesOf(guard(() => comms[field]))) {
-        if (isText(channelId) && !this._sessionOf(comms, channelId, channel)) return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Whether the sidebar has started: its webview is there (`provider.sidebarComms`), its page is ready, and then
-   * either its start-up chat's channel came (a channel no session named) or sidebarStartupMs passed (a sidebar that
-   * reopens an older session starts none).
-   */
-  _sidebarStarted() {
-    const comms = guard(() => this.provider.sidebarComms);
-    if (typeof comms !== 'object' || comms === null) return false;
-    this._watchReady(comms);
-    const readyAt = this._readyAt.get(comms);
-    if (readyAt === undefined) return false;
-    return Date.now() - readyAt >= this.sidebarStartupMs || this._hasUnnamedChannel(comms);
-  }
-
-  /**
-   * Starts a sidebar that has not: reveals it when it has no webview yet (the focus command the extension uses), then
-   * waits until it has started. Rejects `open_failed` (the command failed) or `timeout` at `deadline`; nothing was
-   * opened or sent then.
-   * @param {number} deadline  Date.now() by which the new session's channel must be there
-   */
-  async _startSidebar(deadline) {
-    if (this._sidebarStarted()) return;
-    const comms = guard(() => this.provider.sidebarComms);
-    if (typeof comms !== 'object' || comms === null) {
-      this._say('window agent: revealed the Claude Code sidebar to open a new session there');
-      await this._command(this._sidebarFocusCommand());
-    }
-    await this._waitFor(() => (this._sidebarStarted() ? true : undefined), Math.max(0, deadline - Date.now()));
   }
 
   /**
