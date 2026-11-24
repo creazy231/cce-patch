@@ -131,19 +131,30 @@ function patchWebviewJs(code: string): { patched: string; count: number } {
   const isOpenVar = funcMatch[2];
   console.log(`  Sessions function: ${funcName}, isOpen var: "${isOpenVar}"`);
 
-  // Step 3: Remove the "if not open, return null" guard
+  // Step 3: Remove the "if not open, return null" guard. Its shape depends on what the
+  // minifier folded into the `if`. Up to 2.1.330 the effect before it was folded in:
+  //   if(M(()=>{if(e)S.current()},[e]),!e)return null;
+  // 2.1.331 calls a hook in between (`Ume(e)`, the focus to restore on Escape), so the
+  // guard stands alone:
+  //   M(()=>{if(e)S.current()},[e]);let R=Ume(e);if(!e)return null;
+  // Only the component's prologue is searched: from its body to its first nested function.
   const guardAnchor = `function ${funcName}({isOpen:${isOpenVar},`;
   const guardIdx = patched.indexOf(guardAnchor);
-  if (guardIdx !== -1) {
-    const funcChunk = patched.substring(guardIdx, guardIdx + 600);
-    const guardPattern = `[${isOpenVar}]),!${isOpenVar})return null;`;
-    const guardLocalIdx = funcChunk.indexOf(guardPattern);
-    if (guardLocalIdx !== -1) {
-      const absIdx = guardIdx + guardLocalIdx;
-      patched =
-        patched.substring(0, absIdx) +
-        `[${isOpenVar}]),!0)/*patched:sessions-always-open*/void 0;` +
-        patched.substring(absIdx + guardPattern.length);
+  const bodyIdx = guardIdx === -1 ? -1 : patched.indexOf("}){", guardIdx);
+  if (bodyIdx !== -1) {
+    const bodyStart = bodyIdx + 3;
+    const nextFn = patched.indexOf("function ", bodyStart);
+    const prologueEnd = Math.min(nextFn === -1 ? Infinity : nextFn, bodyStart + 1500);
+    const prologue = patched.substring(bodyStart, prologueEnd);
+    const openEsc = escRe(isOpenVar);
+    const guardRe = new RegExp(`,!${openEsc}\\)return null;|(^|[;{}])if\\(!${openEsc}\\)return null;`);
+    const guard = prologue.match(guardRe);
+    if (guard && guard.index !== undefined) {
+      const absIdx = bodyStart + guard.index;
+      const replacement = guard[0].startsWith(",")
+        ? `,!0)/*patched:sessions-always-open*/void 0;`
+        : `${guard[1]}/*patched:sessions-always-open*/`;
+      patched = patched.substring(0, absIdx) + replacement + patched.substring(absIdx + guard[0].length);
       count++;
       console.log(`  Removed isOpen guard (anchored to ${funcName})`);
     } else {
