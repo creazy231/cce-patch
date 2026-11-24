@@ -375,13 +375,18 @@ Actions:
   content:[…images as {type:"image",source:{type:"base64",media_type,data}}, {type:"text",text}]}}`
   and `fromClient({type:"io_message", channelId, message, done:false})`. The channel
   is the one on that session (also pending ones). Without one:
-  `executeCommand("claude-vscode.editor.open", sessionId, …, {programmatic:"pin-to-panel"})`,
-  wait up to 20 s for a channel on that session, then inject. A session an editor
-  tab shows without a channel (its CLI exited; showing it again does not start one)
-  has that tab closed first (`provider.sessionPanels`), so the open resumes it in a
-  fresh tab; one the sidebar shows gets one open, then `not_running_in_vscode` after
-  5 s. For a new session (`null`): `editor.open` with no session and the same
-  option, wait up to 20 s for a channel that didn't exist before, then inject. Text ≤ 100 000 chars; ≤ 4 images, ≤ 5 MB
+  `executeCommand("claude-vscode.editor.open", sessionId, …, {programmatic:"honor-preferred-location"})`,
+  so it opens where the user keeps Claude Code (the sidebar or a tab; see
+  `2026-11-24-phone-sessions-in-sidebar-design.md`), wait up to 20 s for a channel on
+  that session, then inject. A session an editor tab shows without a channel (its CLI
+  exited; showing it again does not start one) has that tab closed first
+  (`provider.sessionPanels`) and is reopened with `pin-to-panel`, so a fresh tab
+  resumes it; one the sidebar shows gets one open, then `not_running_in_vscode` after
+  5 s. For a new session (`null`): `editor.open` with no session and
+  `honor-preferred-location`, wait up to 20 s for a channel that didn't exist before
+  and that the webview hasn't closed (in the sidebar: the newest such channel, once it
+  has stayed the newest for 500 ms, so a booting sidebar's start-up chat is never
+  taken), then inject. Text ≤ 100 000 chars; ≤ 4 images, ≤ 5 MB
   base64 each, `image/jpeg|png|gif|webp`.
 - `answer(sessionId, requestId, result)`: the request must be pending on that
   session. The result is validated and normalised by kind (the shapes listed under
@@ -840,8 +845,9 @@ pack, base directory `remote-app`, port 80, a domain with HTTPS).
   reloads (all windows join) until Disconnect.
 - Only the Mac's own Tailscale user can pair or connect, and a token is required on
   top.
-- Host-side injection (not webview-side) for every action. New sessions open in an
-  editor tab.
+- Host-side injection (not webview-side) for every action. New sessions open where
+  the user keeps Claude Code (an editor tab until 2026-11-24; see
+  `2026-11-24-phone-sessions-in-sidebar-design.md`).
 - Image attachments included. Push notifications, cloud sessions, settings and
   diff views left out.
 - Work happens on a local feature branch `phone-remote` (made from `main`), one

@@ -1,6 +1,6 @@
 # Phone sessions open in the sidebar (design)
 
-Date: 2026-11-24 · Status: approved 2026-11-24, to be built.
+Date: 2026-11-24 · Status: built on 2026-11-24.
 
 The user asked: "when opening a new session from the web app, it opens a new tab in the code editor view instead of inside the claude code extension … is it somehow possible to make it so that a new session will open inside the claude code extension instead of a new tab inside the code view?" They keep Claude Code in the right-hand sidebar (`claudeCode.preferredLocation` is `"sidebar"` in their Insiders settings), and the phone's session landed as a tab next to their code. They approved the design below as proposed.
 
@@ -18,7 +18,8 @@ The user asked: "when opening a new session from the web app, it opens a new tab
 - **In the webview.** The comms waits for its `clientReady`, then posts `activate_session`. The webview first finishes its own start-up (restoring or creating its first session). Then it opens the session, or, when no session was given, creates a new one and makes it the active one.
 - **A session that becomes active starts its Claude process at once** (`preloadConnection` → `launch_claude`). The host's channel for a new session has no session id; a resumed one carries its id from the launch. This is the channel the agent already waits for in a tab.
 - **What a switch ends.** When the active session changes, the webview ends other sessions' processes only if they are unused empty chats (`endUnusedProcess`). A session with messages keeps running. Its unsent text is kept: Claude Code keeps it since 2.1.300, and the patch adds the @-mentions.
-- **A sidebar that starts with nothing to restore** creates an empty start-up chat, which starts its own Claude process. A request parked until then is handled after that chat. So two channels without a session id appear one after the other, and the start-up chat's process ends once the new session becomes active.
+- **A sidebar that is still booting** can create an empty start-up chat. Its Claude process doesn't start when the page is ready: it starts when the boot finishes, and the parked request's new session comes right after it. The new session becoming active makes the webview close the start-up chat's channel (an unused empty chat) before it launches its own. The end-to-end check measured 51 ms and 132 ms between the start-up launch and its close, and 8.7 s between the page being ready and that launch.
+- **The host reads the webview's messages one by one.** A launch can hold them up (a folder-trust prompt held them for a minute; a config load for 2.8 s), so a channel the webview has closed can stay in the host's maps for that long.
 - **Older extensions** without `activateInSidebar` (2.1.220, in Cursor) ignore the option, and `editor.open` opens a tab, as today.
 
 ## Approaches
@@ -30,12 +31,10 @@ The user asked: "when opening a new session from the web app, it opens a new tab
 ## Behaviour
 
 - **New session from the phone** (`send(null, …)`): `editor.open(undefined, …, {programmatic:"honor-preferred-location"})`. Where Claude Code is kept in the sidebar, the sidebar switches to the new session; where it is kept in tabs, a tab opens as today. The agent takes the new channel and injects the prompt as before.
-- **A sidebar that hasn't started yet in that window.** This path applies when the host has `activateInSidebar`, the preferred location is `"sidebar"` and `provider.sidebarComms` is not set.
-  - The agent first reveals the sidebar with the focus command the extension uses.
-  - It waits until the sidebar has started: its comms is there and its `clientReady` has resolved.
-  - Then it waits for the start-up chat's channel, or for a short time to pass. A sidebar that reopens an older session starts no start-up chat.
-  - Only then does it run `editor.open`. The start-up chat's channel is already known by then, so it can't be taken for the new session.
-  - The whole wait for the new session's channel, sidebar start included, stays within `channelWaitMs` (20 s), as today.
+- **A sidebar that hasn't started, or is still booting.** `editor.open` reveals the sidebar itself and holds the session until the view is up. The start-up chat must never get the phone's message, so:
+  - the agent never takes a channel that the webview (or the host) has closed, even while the host still lists it;
+  - where a new session opens in the sidebar (the host has `activateInSidebar` and the preferred location is `"sidebar"`), the agent takes the newest new channel only once it has stayed the newest for 500 ms (`AGENT_LIMITS.sidebarSettleMs`);
+  - the wait for the channel stays within `channelWaitMs` (20 s), as today.
 - **An older session the phone messages that has no Claude process and isn't shown anywhere**: `editor.open(id, …, {programmatic:"honor-preferred-location"})`. The sidebar switches to the session and resumes it; for a tab user, a tab opens as today. The agent finds its channel by session id, as before.
 - **Unchanged:**
   - a session that an editor tab still shows without a process is closed and reopened in a tab (`pin-to-panel`);
@@ -51,18 +50,17 @@ The user asked: "when opening a new session from the web app, it opens a new tab
 
 ## Testing
 
-- **Test-first on the fake extension** (`remote-bridge/test/window-agent.test.ts`):
-  - The fake vscode gains `workspace.getConfiguration(section).get(key)` and `version`.
-  - The fake provider gains an optional `activateInSidebar` and `sidebarComms`, and a comms gains `clientReady`.
+- **Test-first on the fake extension** (`remote-bridge/test/window-agent.test.ts`). The fake vscode gains `workspace.getConfiguration(section).get(key)`, and the fake provider an optional `activateInSidebar`.
 - **Cases:**
   - a new session with the sidebar preference and with the panel preference;
-  - a sidebar that hasn't started: one with an empty start-up chat, and one that reopens an older session and starts no start-up chat;
+  - a booting sidebar's start-up chat, launched with the new session and closed by the webview, both while the host is held (a trust prompt) and in a sidebar that hasn't started;
+  - of two new channels in the sidebar, the newer one;
   - an older session woken in the sidebar;
   - the unchanged tab and sidebar cases;
   - a host without `activateInSidebar`.
-- **End to end:** an isolated Insiders with the patched 2.1.330 (the recipe in CLAUDE.md). Send a new session through the window agent and check that the sidebar shows it, both for a sidebar that has started and for one that hasn't.
+- **End to end:** an isolated Insiders with the patched 2.1.330 (the recipe in CLAUDE.md), sending through the window agent. A sidebar that hadn't started and one that had both showed the new session with the prompt answered, and no editor tab opened.
 
-## Left to the builder
+## Decisions after the end-to-end check
 
-- The short wait for the start-up chat's channel (about 3 s).
-- How the agent reads the preferred location: through `vscode.workspace.getConfiguration("claudeCode")`, as the host reads it, or through the host's `provider.settings.getPreferredLocation()` where that exists.
+- **No wait for the sidebar to start.** The first design revealed the sidebar and waited for its page to be ready, then up to 3 s for the start-up chat, before running `editor.open`. In the real extension the start-up chat launched 8.7 s after the page was ready, together with the new session. The agent took its channel, the webview closed it, and the prompt was lost. `editor.open` already reveals the sidebar and holds the session, so the agent now relies on that, on closed channels, and on the 500 ms settle.
+- **The preferred location** is read through `vscode.workspace.getConfiguration("claudeCode")`, as the host reads it.
