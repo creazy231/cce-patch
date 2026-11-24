@@ -1455,7 +1455,7 @@ describe("send", () => {
     expect(sidebar.received).toHaveLength(1);
   });
 
-  test("send(s3) (listed, no channel) opens it in an editor and sends to its channel once it appears", async () => {
+  test("send(s3) (listed, no channel) opens it where the user keeps Claude Code and sends to its channel once it appears", async () => {
     const { agent, vscode, provider } = windowWith();
     let opened: FakeComms | undefined;
     vscode.commands.onCommand = () => {
@@ -1466,7 +1466,7 @@ describe("send", () => {
       }, 100);
     };
     const sent = await agent.send("s3", "hi");
-    expect(vscode.commands.calls).toEqual([editorOpen("s3", PIN_TO_PANEL)]);
+    expect(vscode.commands.calls).toEqual([editorOpen("s3", HONOR_LOCATION)]);
     expect(sent).toEqual({ session: "s3", uuid: expect.stringMatching(UUID) });
     expect(opened!.received).toEqual([{ type: "io_message", channelId: "c3", done: false, message: expect.objectContaining({ uuid: sent.uuid }) }]);
     await opened!.flush();
@@ -1478,7 +1478,17 @@ describe("send", () => {
     const started = Date.now();
     await expect(agent.send("s3", "hi")).rejects.toThrow("timeout");
     expect(Date.now() - started).toBeGreaterThanOrEqual(290);
-    expect(vscode.commands.calls).toEqual([editorOpen("s3", PIN_TO_PANEL)]);
+    expect(vscode.commands.calls).toEqual([editorOpen("s3", HONOR_LOCATION)]);
+  });
+
+  test("send(s3) for a user who keeps Claude Code in the sidebar: the sidebar resumes s3 without being revealed first, and s1 there is left alone", async () => {
+    const { agent, vscode, sidebar } = sidebarWindow({ started: false });
+    vscode.commands.onCommand = () => void setTimeout(() => sidebar.openChannel("c3", "s3", { pending: true }), 50);
+    const sent = await agent.send("s3", "hi");
+    expect(vscode.commands.calls).toEqual([editorOpen("s3", HONOR_LOCATION)]);
+    expect(sent).toEqual({ session: "s3", uuid: expect.stringMatching(UUID) });
+    expect(sidebar.received.map((m) => m.channelId)).toEqual(["c3"]);
+    expect(sidebar.channels.get("c1")?.sessionId).toBe("s1");
   });
 
   test("send to a session whose tab is open but whose Claude process stopped: the tab is closed, the session reopened, the prompt sent there", async () => {

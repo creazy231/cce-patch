@@ -1881,11 +1881,12 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * The channel of a session, opened when it has none. A session that VS Code shows without a Claude Code
-   * process (the CLI exited, or the host closed it) does not start one when it is shown again; only a prompt
-   * typed there would. So its editor tab is closed and the session opened again (the fresh tab resumes it).
-   * The sidebar is never closed: a session it shows gets one open, then `not_running_in_vscode` after
-   * wakeWaitMs, as does a tab that cannot be closed.
+   * The channel of a session, opened when it has none. A session VS Code doesn't show opens where the user keeps
+   * Claude Code (the sidebar resumes it, or a tab). A session that VS Code shows without a Claude Code process (the
+   * CLI exited, or the host closed it) does not start one when it is shown again; only a prompt typed there would.
+   * So one that a tab still shows has that tab closed and is reopened in a tab (the fresh tab resumes it). The
+   * sidebar is never closed: a session it shows gets one open, then `not_running_in_vscode` after wakeWaitMs, as
+   * does a tab that cannot be closed.
    * @param {string} sessionId
    * @returns {Promise<ChannelRef>}
    */
@@ -1900,7 +1901,9 @@ class WindowAgent extends EventEmitter {
       this._say('window agent: closed the editor tab of a session whose Claude Code process had stopped, to open it again');
       return this._openAndWait(find, OPEN_EDITOR, ...open);
     }
-    if (panel === undefined && !this._sidebarHolds(sessionId)) return this._openAndWait(find, OPEN_EDITOR, ...open);
+    // Shown nowhere: where the user keeps Claude Code. Its channel is found by its session, so a sidebar that has
+    // not started needs no waiting for here.
+    if (panel === undefined && !this._sidebarHolds(sessionId)) return this._openAndWait(find, OPEN_EDITOR, ...editorArgs(sessionId, HONOR_LOCATION));
     try {
       return await this._openAndWaitMs(this.wakeWaitMs, find, OPEN_EDITOR, ...open);
     } catch (error) {
