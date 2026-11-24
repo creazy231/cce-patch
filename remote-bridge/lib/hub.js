@@ -61,7 +61,7 @@ const STATUS_REFRESH_MS = 5000; // how often the hub asks for the Mac's DNS name
 const DNS_NAME_RE = /^[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})*$/;
 /**
  * How long each window call may take. A send to a new session can take about 40 s in the window
- * (up to 20 s for the editor tab's channel, up to 20 s for the session's name); the app waits 60 s.
+ * (up to 20 s for the new session's channel, a sidebar's start included, and up to 20 s for its name); the app waits 60 s.
  * @type {Readonly<Record<string, number>>}
  */
 const DEFAULT_CALL_TIMEOUTS_MS = Object.freeze({ snapshot: 20_000, send: 50_000, answer: 20_000, interrupt: 20_000, open: 20_000, openClaude: 20_000, active: 10_000, usage: 20_000, commands: 15_000 });

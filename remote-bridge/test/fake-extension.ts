@@ -238,6 +238,11 @@ export class FakeComms {
   configLoads = 0;
   /** Set when a handler threw: the host's reader is dead, and later `fromClient` messages are recorded but never handled. */
   readerError: unknown = undefined;
+  /**
+   * Settles when the webview's page has started and said hello (the host's `clientReady`). Resolved here; a test
+   * that models a page still loading puts its own promise here before the comms joins `allComms`.
+   */
+  clientReady: Promise<void> = Promise.resolve();
   private readerDead = false;
   private readonly histories = new Map<string, Message[]>();
   private readonly launchCwds = new Map<string, string>();
@@ -958,6 +963,17 @@ export interface FakeProvider {
   sessionPanels: Map<string, FakePanel>;
   /** Whether the sidebar shows the session or has a channel on it (the host's `sidebarHoldsSession`); false unless a test says otherwise. */
   sidebarHoldsSession(sessionId: string): boolean;
+  /**
+   * The comms of the sidebar's webview once VS Code resolved it (the host sets it when the view comes up and clears it
+   * when the view goes). Absent: no sidebar webview yet, or a host without the field.
+   */
+  sidebarComms?: FakeComms;
+  /**
+   * Hands a session (or a new one, `sessionId` undefined) to the sidebar's webview: the host's `activateInSidebar`,
+   * which `editor.open` uses for `honor-preferred-location` when the user keeps Claude Code in the sidebar (2.1.328+).
+   * Absent: an older host, whose `editor.open` always opens a tab.
+   */
+  activateInSidebar?: (sessionId?: string, initialPrompt?: string) => void;
   /** The usage meter's relay; only with `createFakeProvider({ usage: true })` (extensions before 2.1.325 have none). */
   panelUsageRelay?: FakeUsageRelay;
   /** Another account signed in outside this window (a terminal, another window): the relay's numbers go, and every comms forgets its `claude auth status` answer. */
@@ -1040,7 +1056,13 @@ export interface FakeVscode {
     onDidChangeWorkspaceFolders(listener: (event: { added: FakeWorkspaceFolder[]; removed: FakeWorkspaceFolder[] }) => void): { dispose(): void };
     /** For the test: opens other folders and fires `onDidChangeWorkspaceFolders`. */
     setFolders(folders: string[]): void;
+    /** A section of the user's settings, read from `settings` at each `get` (as VS Code reads the live value). */
+    getConfiguration(section: string): { get(key: string): unknown };
   };
+  /** The user's settings by full key (`"claudeCode.preferredLocation"`); a test may change them at any time. */
+  settings: Record<string, unknown>;
+  /** VS Code's version (`vscode.version`). */
+  version: string;
   env: { appName: string };
   commands: {
     executeCommand(id: string, ...args: any[]): Promise<any>;
@@ -1057,7 +1079,10 @@ export function createFakeVscode({
   folders = ["/work/demo"],
   appName = "Visual Studio Code - Insiders",
   name = "demo",
-}: { folders?: string[]; appName?: string; name?: string | null } = {}): FakeVscode {
+  settings = {},
+  version = "1.107.0",
+}: { folders?: string[]; appName?: string; name?: string | null; settings?: Record<string, unknown>; version?: string } = {}): FakeVscode {
+  const userSettings: Record<string, unknown> = { ...settings };
   const toFolders = (paths: string[]): FakeWorkspaceFolder[] =>
     paths.map((path, index) => ({ uri: { scheme: "file", path, fsPath: path, toString: () => `file://${path}` }, name: basename(path), index }));
   const listeners = new Set<(event: { added: FakeWorkspaceFolder[]; removed: FakeWorkspaceFolder[] }) => void>();
@@ -1081,6 +1106,9 @@ export function createFakeVscode({
       const event = { added: after.filter((folder) => !known(before, folder)), removed: before.filter((folder) => !known(after, folder)) };
       for (const listener of [...listeners]) listener(event);
     },
+    getConfiguration(section) {
+      return { get: (key) => userSettings[`${section}.${key}`] };
+    },
   };
 
   const commands: FakeVscode["commands"] = {
@@ -1093,6 +1121,8 @@ export function createFakeVscode({
 
   return {
     workspace,
+    settings: userSettings,
+    version,
     env: { appName },
     commands,
     get onCommand() {

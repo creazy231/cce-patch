@@ -120,6 +120,8 @@ interface Options {
   /** The provider has Claude Code's usage meter (`panelUsageRelay`), wired to both comms. */
   usage?: boolean;
   usageReadMs?: number;
+  /** How long a sidebar whose page just got ready gets to start its start-up chat; 0 here unless a test says otherwise. */
+  sidebarStartupMs?: number;
   /** Runs before the agent instruments the comms, e.g. to put an instance method in front of the fake's. */
   before?: (comms: { sidebar: FakeComms; tab: FakeComms; provider: FakeProvider }) => void;
 }
@@ -148,6 +150,7 @@ function windowWith(options: Options = {}) {
     hostReadMs: options.hostReadMs,
     wakeWaitMs: options.wakeWaitMs,
     usageReadMs: options.usageReadMs,
+    sidebarStartupMs: options.sidebarStartupMs ?? 0,
   });
   const events: Array<[string, any]> = [];
   const projects: any[] = [];
@@ -170,6 +173,32 @@ const editorOpen = (session: string | undefined, options: object) => ({
   id: "claude-vscode.editor.open",
   args: [session, undefined, undefined, undefined, undefined, options],
 });
+
+// The user keeps Claude Code in the sidebar; the extension reveals it with this command (the secondary sidebar's from VS Code 1.106 on).
+const SIDEBAR = { "claudeCode.preferredLocation": "sidebar" };
+const focusCall = (id = "claudeVSCodeSidebarSecondary.focus") => ({ id, args: [] });
+
+/** A host that can open sessions in the sidebar, for a user who keeps Claude Code there. `started: false`: no sidebar webview yet. */
+function sidebarWindow(options: Options & { started?: boolean } = {}) {
+  return windowWith({
+    ...options,
+    vscode: options.vscode ?? createFakeVscode({ settings: { ...SIDEBAR } }),
+    before: (parts) => {
+      parts.provider.activateInSidebar = () => {};
+      if (options.started !== false) parts.provider.sidebarComms = parts.sidebar;
+      options.before?.(parts);
+    },
+  });
+}
+
+/** What the host does when the sidebar's webview resolves. `setup` runs before allComms.add, where the agent starts watching clientReady. */
+function bringUpSidebar(provider: FakeProvider, setup?: (comms: FakeComms) => void): FakeComms {
+  const comms = createFakeComms({ sessions: LISTED });
+  setup?.(comms);
+  provider.allComms.add(comms);
+  provider.sidebarComms = comms;
+  return comms;
+}
 
 const sessionOf = (project: any, id: string) => project.sessions.find((s: any) => s.id === id);
 const pendingEvents = (events: Array<[string, any]>) => events.filter(([, ev]) => ev.t === "pending");
@@ -1545,7 +1574,7 @@ describe("send", () => {
       }, 50);
     };
     const sent = await agent.send(null, "new");
-    expect(vscode.commands.calls).toEqual([editorOpen(undefined, PIN_TO_PANEL)]);
+    expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION)]);
     expect(opened!.received).toEqual([{ type: "io_message", channelId: "c-new", done: false, message: expect.objectContaining({ uuid: sent.uuid }) }]);
     const named = opened!.channels.get("c-new")!.sessionId;
     expect(named).toMatch(/^s-\d+$/);
@@ -1655,6 +1684,161 @@ describe("send", () => {
     const [first, second] = await Promise.all([agent.send(null, "one"), agent.send(null, "two")]);
     expect(opened.map((comms) => comms.received.length)).toEqual([1, 1]);
     expect(new Set([first.session, second.session]).size).toBe(2);
+  });
+});
+
+// ---- where a new session opens: where the user keeps Claude Code -------------------------------------
+
+describe("where a new session opens", () => {
+  const tabOnOpen = (provider: FakeProvider) => () =>
+    void setTimeout(() => {
+      const opened = createFakeComms({ sessions: LISTED });
+      opened.openChannel("c-new");
+      provider.allComms.add(opened);
+    }, 30);
+
+  test("the sidebar takes the new session where the user keeps Claude Code, and the prompt goes there", async () => {
+    const { agent, vscode, sidebar, tab } = sidebarWindow();
+    vscode.commands.onCommand = () => void setTimeout(() => sidebar.openChannel("c-new"), 50);
+    const sent = await agent.send(null, "new");
+    expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION)]);
+    expect(sidebar.received.map((m) => m.channelId)).toEqual(["c-new"]);
+    expect(sent.session).toMatch(/^s-\d+$/);
+    expect(sent.session).toBe(sidebar.channels.get("c-new")!.sessionId!);
+    expect(tab.received).toEqual([]);
+  });
+
+  test("a sidebar that hasn't started is revealed first, and its start-up chat's channel is never taken", async () => {
+    const { agent, vscode, provider } = sidebarWindow({ started: false, sidebarStartupMs: 2000 });
+    let up: FakeComms | undefined;
+    vscode.commands.onCommand = (id) => {
+      if (id === "claudeVSCodeSidebarSecondary.focus")
+        setTimeout(() => {
+          up = bringUpSidebar(provider);
+          setTimeout(() => up!.openChannel("c-startup"), 30);
+        }, 30);
+      else setTimeout(() => up!.openChannel("c-new"), 30);
+    };
+    const sent = await agent.send(null, "new");
+    expect(vscode.commands.calls).toEqual([focusCall(), editorOpen(undefined, HONOR_LOCATION)]);
+    expect(up!.received.map((m) => m.channelId)).toEqual(["c-new"]);
+    expect(sent.session).toBe(up!.channels.get("c-new")!.sessionId!);
+  });
+
+  test("a sidebar that reopens an older session starts no start-up chat: the open follows after the short wait", async () => {
+    const { agent, vscode, provider } = sidebarWindow({ started: false, sidebarStartupMs: 300 });
+    let up: FakeComms | undefined;
+    let upAt = 0;
+    let openedAt = 0;
+    vscode.commands.onCommand = (id) => {
+      if (id === "claudeVSCodeSidebarSecondary.focus") {
+        up = bringUpSidebar(provider, (comms) => void comms.openChannel("c-old", "s3"));
+        upAt = Date.now();
+        return;
+      }
+      openedAt = Date.now();
+      setTimeout(() => up!.openChannel("c-new"), 30);
+    };
+    await agent.send(null, "new");
+    expect(openedAt - upAt).toBeGreaterThanOrEqual(290);
+    expect(up!.received.map((m) => m.channelId)).toEqual(["c-new"]);
+  });
+
+  test("the short wait starts once the sidebar's page is ready (clientReady), not when its comms appears", async () => {
+    const { agent, vscode, provider } = sidebarWindow({ started: false, sidebarStartupMs: 200 });
+    let up: FakeComms | undefined;
+    let readyAt = 0;
+    let openedAt = 0;
+    vscode.commands.onCommand = (id) => {
+      if (id === "claudeVSCodeSidebarSecondary.focus") {
+        up = bringUpSidebar(provider, (comms) => {
+          comms.clientReady = new Promise<void>((resolve) =>
+            setTimeout(() => {
+              readyAt = Date.now();
+              resolve();
+            }, 300),
+          );
+        });
+        return;
+      }
+      openedAt = Date.now();
+      setTimeout(() => up!.openChannel("c-new"), 30);
+    };
+    await agent.send(null, "new");
+    expect(readyAt).toBeGreaterThan(0);
+    expect(openedAt - readyAt).toBeGreaterThanOrEqual(190);
+  });
+
+  test("before VS Code 1.106 the sidebar is revealed with claudeVSCodeSidebar.focus", async () => {
+    const vscode = createFakeVscode({ settings: { ...SIDEBAR }, version: "1.105.2" });
+    const { agent } = sidebarWindow({ started: false, channelWaitMs: 300, vscode });
+    await expect(agent.send(null, "new")).rejects.toThrow("timeout");
+    expect(vscode.commands.calls[0]).toEqual(focusCall("claudeVSCodeSidebar.focus"));
+  });
+
+  test("a focus command that fails rejects open_failed, and nothing is opened or sent", async () => {
+    const { agent, vscode, sidebar, tab, logs } = sidebarWindow({ started: false });
+    vscode.commands.onCommand = () => {
+      throw new Error("command 'claudeVSCodeSidebarSecondary.focus' not found");
+    };
+    await expect(agent.send(null, "new")).rejects.toThrow("open_failed");
+    expect(vscode.commands.calls).toEqual([focusCall()]);
+    expect([...sidebar.received, ...tab.received]).toEqual([]);
+    expect(logs.some((line) => line.includes("not found"))).toBe(true);
+  });
+
+  test("no sidebar start where the host can't open sessions there, or where the user keeps tabs", async () => {
+    const olderHost = windowWith({ vscode: createFakeVscode({ settings: { ...SIDEBAR } }) });
+    const keepsTabs = windowWith({ before: ({ provider }) => void (provider.activateInSidebar = () => {}) });
+    for (const { agent, vscode, provider } of [olderHost, keepsTabs]) {
+      vscode.commands.onCommand = tabOnOpen(provider);
+      await agent.send(null, "new");
+      expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION)]);
+    }
+  });
+
+  // The plan's Review Focus 1, 2, 3 and 5.
+
+  test("an empty chat the sidebar shows with its own Claude process is left alone: the prompt goes to the new session", async () => {
+    const { agent, vscode, sidebar } = sidebarWindow({ before: (parts) => void parts.sidebar.openChannel("c-blank") });
+    vscode.commands.onCommand = () => void setTimeout(() => sidebar.openChannel("c-new"), 50);
+    await agent.send(null, "new");
+    expect(sidebar.received.map((m) => m.channelId)).toEqual(["c-new"]);
+  });
+
+  test("a sidebar whose page is still loading is waited for: its start-up chat, launching when the open runs, is never taken", async () => {
+    let ready!: () => void;
+    const { agent, vscode, sidebar } = sidebarWindow({
+      sidebarStartupMs: 2000,
+      before: (parts) => void (parts.sidebar.clientReady = new Promise<void>((resolve) => (ready = resolve))),
+    });
+    setTimeout(() => {
+      ready();
+      setTimeout(() => sidebar.openChannel("c-startup", undefined, { pending: true }), 20);
+    }, 100);
+    vscode.commands.onCommand = () => {
+      sidebar.promoteChannel("c-startup"); // the start-up chat's Claude process is up by now
+      setTimeout(() => sidebar.openChannel("c-new"), 30);
+    };
+    await agent.send(null, "new");
+    expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION)]); // its comms was there: not revealed again
+    expect(sidebar.received.map((m) => m.channelId)).toEqual(["c-new"]);
+  });
+
+  test("the preferred location is read at each send: a switch to tabs while VS Code runs counts at once", async () => {
+    const { agent, vscode, provider } = sidebarWindow({ started: false });
+    vscode.settings["claudeCode.preferredLocation"] = "panel";
+    vscode.commands.onCommand = tabOnOpen(provider);
+    await agent.send(null, "new");
+    expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION)]);
+  });
+
+  test("a sidebar that never comes up rejects timeout within channelWaitMs, and no session is asked for", async () => {
+    const { agent, vscode } = sidebarWindow({ started: false, channelWaitMs: 400 });
+    const startedAt = Date.now();
+    await expect(agent.send(null, "new")).rejects.toThrow("timeout");
+    expect(Date.now() - startedAt).toBeLessThan(900);
+    expect(vscode.commands.calls).toEqual([focusCall()]);
   });
 });
 

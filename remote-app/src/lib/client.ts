@@ -115,7 +115,7 @@ const PONG_WITHIN_MS = 10_000;
 /** The same, when the app has just come back to the foreground (a sleeping phone leaves half-open sockets). */
 const PROBE_WITHIN_MS = 4_000;
 const ACK_TIMEOUT_MS = 30_000;
-/** Starting a session waits on the Mac for VS Code's new tab and then for the session's name: up to ~40 s. */
+/** Starting a session waits on the Mac for the new session's Claude process (in VS Code's sidebar or a new tab) and then for its name: up to ~40 s. */
 const NEW_SESSION_ACK_TIMEOUT_MS = 60_000;
 /** A window's slash commands: the Mac gives the window 15 s, the phone a little more. */
 const COMMANDS_ACK_TIMEOUT_MS = 20_000;
@@ -295,7 +295,7 @@ export class RemoteClient {
     return this.request((id) => ({ t: "interrupt", id, project, session }));
   }
 
-  /** Opens the session in an editor tab on the Mac. */
+  /** Opens the session on the Mac where Claude Code is kept: the sidebar or an editor tab. */
   open(project: string, session: string): Promise<Ack> {
     return this.request((id) => ({ t: "open", id, project, session }));
   }
