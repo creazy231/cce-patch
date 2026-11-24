@@ -384,9 +384,10 @@ Actions:
   resumes it; one the sidebar shows gets one open, then `not_running_in_vscode` after
   5 s. For a new session (`null`): `editor.open` with no session and
   `honor-preferred-location`, wait up to 20 s for a channel that didn't exist before
-  and that the webview hasn't closed (in the sidebar: the newest such channel, once it
-  has stayed the newest for 500 ms, so a booting sidebar's start-up chat is never
-  taken), then inject. Text ≤ 100 000 chars; ≤ 4 images, ≤ 5 MB
+  and that the webview hasn't closed (in the sidebar: the newest such channel, once the
+  sidebar's first session list is answered and it has stayed the newest for 500 ms, so
+  a booting sidebar's start-up chat is never taken; while another phone session is
+  still starting there, `pin-to-panel` instead), then inject. Text ≤ 100 000 chars; ≤ 4 images, ≤ 5 MB
   base64 each, `image/jpeg|png|gif|webp`.
 - `answer(sessionId, requestId, result)`: the request must be pending on that
   session. The result is validated and normalised by kind (the shapes listed under

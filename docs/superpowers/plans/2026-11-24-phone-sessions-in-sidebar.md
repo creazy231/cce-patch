@@ -13,6 +13,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-24-phone-sessions-in-sidebar-design.md`
 
+> **Superseded in part (2026-11-24).** Task 1's reveal-and-wait mechanism (focus command, `clientReady`, `sidebarStartupMs`) failed the end-to-end check and was replaced, together with fixes from the whole-branch review. The spec's "Decisions after the end-to-end check" describes what was built instead.
+
 **Branch:** `phone-sessions-sidebar`, from `main` (f147809). Fast-forward `main` when done, if the user agrees.
 
 ## Global Constraints
