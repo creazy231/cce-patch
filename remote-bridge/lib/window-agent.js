@@ -139,9 +139,12 @@ const AGENT_LIMITS = Object.freeze({
   imageChars: 5 * 1024 * 1024, // base64 characters of one image
   hostReadMs: 10_000, // how long a transcript or session list read of the host may take
   usageReadMs: 15_000, // how long refreshUsage() waits for a usage read through a Claude process
-  // How long a new channel in the sidebar must stay the newest before send(null) takes it. A sidebar that is still
-  // booting launches its start-up chat right before the new session and closes it a moment later (51 ms in 2.1.330).
+  // How long a new channel in the sidebar must stay the newest before send(null) takes it, counted from when the
+  // sidebar's first session list was answered at the latest: a booting sidebar launches its start-up chat while that
+  // list loads, and once it is answered makes the parked new session active and closes the start-up chat (51 and
+  // 132 ms after its launch in 2.1.330, in a project with no sessions).
   sidebarSettleMs: 500,
+  bootListMs: 15_000, // how long a webview's first session list (`panel_boot`) counts as loading at most
 });
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -660,6 +663,12 @@ class WindowAgent extends EventEmitter {
     this._claimed = new Map();
     /** @type {WeakMap<object, Set<string>>} per comms: channels that are closing (the webview or the host said so), which the host may still list */
     this._closing = new WeakMap();
+    /** @type {WeakMap<object, Map<string, number>>} per comms: its webview's first session lists (`panel_boot`) still loading, by request id: since when */
+    this._bootLists = new WeakMap();
+    /** @type {WeakMap<object, number>} per comms: when the host last answered one of those lists */
+    this._bootListAnswered = new WeakMap();
+    /** @type {Map<string, ChannelRef>} phone sessions opened in the sidebar whose Claude process has not named them yet */
+    this._sidebarStarting = new Map();
     this._active = false;
     // Remote access is on (the coordinator says): only then are session messages mapped, kept and emitted.
     this._enabled = true;
@@ -884,6 +893,7 @@ class WindowAgent extends EventEmitter {
         return false;
       case 'response': {
         const requestId = message.requestId;
+        if (isText(requestId) && this._bootLists.get(comms)?.delete(requestId)) this._bootListAnswered.set(comms, Date.now());
         if (typeof requestId !== 'string' || !requestId.startsWith(INJECTED_ID_PREFIX)) return false;
         const settle = this._injected.get(requestId);
         this._injected.delete(requestId);
@@ -1092,9 +1102,27 @@ class WindowAgent extends EventEmitter {
       case 'launch_claude':
         this._changed();
         return false;
+      case 'request': {
+        // A webview's first session list: until it is answered, a booting sidebar has not made a parked session active.
+        const request = message.request;
+        if (isText(message.requestId) && isRecord(request) && request.type === 'list_sessions_request' && request.entryPoint === 'panel_boot') {
+          let lists = this._bootLists.get(comms);
+          if (!lists) this._bootLists.set(comms, (lists = new Map()));
+          lists.set(message.requestId, Date.now());
+        }
+        return false;
+      }
       default:
         return false;
     }
+  }
+
+  /** Whether the comms' webview is still loading its first session list (for at most AGENT_LIMITS.bootListMs). @param {any} comms */
+  _bootListing(comms) {
+    const lists = this._bootLists.get(comms);
+    if (!lists) return false;
+    for (const [requestId, since] of lists) if (Date.now() - since >= AGENT_LIMITS.bootListMs) lists.delete(requestId);
+    return lists.size > 0;
   }
 
   /** @param {string} requestId */
@@ -1230,9 +1258,10 @@ class WindowAgent extends EventEmitter {
   }
 
   /**
-   * The new session's channel in the sidebar: the newest new channel, once it has stayed the newest for
-   * sidebarSettleMs. A sidebar that is still booting launches its start-up chat right before the new session and
-   * closes it a moment later; the host can list that channel for longer (a folder-trust prompt holds its reads).
+   * The new session's channel in the sidebar: the newest new channel, once its webview's first session list is
+   * answered and it has stayed the newest for sidebarSettleMs since (or since it came, if later). A booting sidebar
+   * launches its start-up chat while that list loads; once it is answered, the parked new session becomes active and
+   * the webview closes the start-up chat, which the host can list for longer (a folder-trust prompt holds its reads).
    * @param {Set<string>} before
    * @param {Map<string, number>} seen  per channel key, when a look first saw it (kept across looks)
    */
@@ -1246,8 +1275,35 @@ class WindowAgent extends EventEmitter {
       if (!seen.has(ref.key)) seen.set(ref.key, Date.now());
       if (!newest || /** @type {number} */ (seen.get(ref.key)) >= /** @type {number} */ (seen.get(newest.key))) newest = ref;
     }
-    if (!newest || Date.now() - /** @type {number} */ (seen.get(newest.key)) < this.sidebarSettleMs) return undefined;
+    if (!newest || this._bootListing(newest.comms)) return undefined;
+    const since = Math.max(/** @type {number} */ (seen.get(newest.key)), this._bootListAnswered.get(newest.comms) ?? 0);
+    if (Date.now() - since < this.sidebarSettleMs) return undefined;
     return this._claim(newest);
+  }
+
+  /**
+   * Whether a phone session opened in the sidebar is still starting: its channel is there and not closing, and no
+   * session has named it yet. Until its Claude process replays the prompt, the webview counts it as an unused empty
+   * chat, and ends it when another session becomes active there.
+   */
+  _sidebarSessionStarting() {
+    for (const [key, ref] of this._sidebarStarting) {
+      const channel = this._channelAt(ref.comms, ref.channelId);
+      const gone = channel === undefined || this._closing.get(ref.comms)?.has(ref.channelId);
+      if (gone || this._sessionOf(ref.comms, ref.channelId, channel)) this._sidebarStarting.delete(key);
+    }
+    return this._sidebarStarting.size > 0;
+  }
+
+  /**
+   * editor.open's options for what the phone opens: where the user keeps Claude Code, or an editor tab while a phone
+   * session is still starting in the sidebar (making another session active there would end that one).
+   * @param {boolean} [sidebar]  whether it would open in the sidebar (_opensInSidebar())
+   */
+  _location(sidebar = this._opensInSidebar()) {
+    if (!sidebar || !this._sidebarSessionStarting()) return HONOR_LOCATION;
+    this._say('window agent: a phone session is still starting in the Claude Code sidebar, so this opens in a tab (in the sidebar it would end that one)');
+    return PIN_TO_PANEL;
   }
 
   /**
@@ -1884,8 +1940,8 @@ class WindowAgent extends EventEmitter {
 
   /**
    * Sends a prompt as the webview would. `sessionId` null starts a new session where the user keeps Claude Code
-   * (the sidebar or an editor tab; a sidebar that hasn't started is revealed and waited for first); a session
-   * without a channel is opened first (see _channelFor). Rejects `empty`, `too_long`, `bad_images`,
+   * (the sidebar or an editor tab; see _sendToNewSession); a session without a channel is opened first (see
+   * _channelFor). Rejects `empty`, `too_long`, `bad_images`,
    * `bad_session`, `unknown_session`, `open_failed`, `timeout` or `not_running_in_vscode` (nothing was sent then), or `closed` (a new
    * session's channel closed before it started: the prompt was lost with it).
    * @param {string | null} sessionId
@@ -1925,7 +1981,7 @@ class WindowAgent extends EventEmitter {
     }
     // Shown nowhere: where the user keeps Claude Code. Its channel is found by its session, so a sidebar that has
     // not started needs no waiting for here.
-    if (panel === undefined && !this._sidebarHolds(sessionId)) return this._openAndWait(find, OPEN_EDITOR, ...editorArgs(sessionId, HONOR_LOCATION));
+    if (panel === undefined && !this._sidebarHolds(sessionId)) return this._openAndWait(find, OPEN_EDITOR, ...editorArgs(sessionId, this._location()));
     try {
       return await this._openAndWaitMs(this.wakeWaitMs, find, OPEN_EDITOR, ...open);
     } catch (error) {
@@ -1978,15 +2034,20 @@ class WindowAgent extends EventEmitter {
   /**
    * Opens a new session where the user keeps Claude Code and sends the prompt into its channel. In the sidebar
    * (editor.open reveals it, and holds the session until it is up), the channel is taken once it has settled, so a
-   * booting sidebar's start-up chat is never taken.
+   * booting sidebar's start-up chat is never taken; while another phone session is still starting there, this one
+   * opens in a tab (see _location).
    * @param {Record<string, any>} message
    */
   async _sendToNewSession(message) {
+    const sidebar = this._opensInSidebar();
+    const options = this._location(sidebar);
+    const settles = sidebar && options === HONOR_LOCATION;
     const before = new Set(this._allChannels().map((ref) => ref.key));
     /** @type {Map<string, number>} */
     const seen = new Map();
-    const find = this._opensInSidebar() ? () => this._takeSettledNewChannel(before, seen) : () => this._takeNewChannel(before);
-    const target = await this._openAndWait(find, OPEN_EDITOR, ...editorArgs(undefined, HONOR_LOCATION));
+    const find = settles ? () => this._takeSettledNewChannel(before, seen) : () => this._takeNewChannel(before);
+    const target = await this._openAndWait(find, OPEN_EDITOR, ...editorArgs(undefined, options));
+    if (settles) this._sidebarStarting.set(target.key, target);
     this._inject(target.comms, { type: 'io_message', channelId: target.channelId, message, done: false });
     try {
       return { session: await this._waitFor(() => this._namedSession(target), this.channelWaitMs), uuid: message.uuid };
@@ -2144,12 +2205,12 @@ class WindowAgent extends EventEmitter {
   /** Opens the session where the user keeps Claude Code, as the session list does. Rejects `bad_session` or `open_failed`. @param {string} sessionId */
   async open(sessionId) {
     if (!isText(sessionId)) throw codeError('bad_session');
-    await this._command(OPEN_EDITOR, ...editorArgs(sessionId, HONOR_LOCATION));
+    await this._command(OPEN_EDITOR, ...editorArgs(sessionId, this._location()));
   }
 
   /** Opens Claude Code (a new session) where the user keeps it: an editor tab or the sidebar. Rejects `open_failed`. */
   async openClaude() {
-    await this._command(OPEN_EDITOR, ...editorArgs(undefined, HONOR_LOCATION));
+    await this._command(OPEN_EDITOR, ...editorArgs(undefined, this._location()));
   }
 
   /**

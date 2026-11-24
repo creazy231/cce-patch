@@ -8,6 +8,14 @@ import { AGENT_LIMITS, WindowAgent } from "../lib/window-agent.js";
 import { FakeComms, addFakePanel, createFakeComms, createFakeProvider, createFakeVscode, createStoredStartupConfig, wireUsage, type FakeAuthStatus, type FakeProvider, type Message } from "./fake-extension";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Waits until `check` holds, looking every 10 ms; throws after `ms`. */
+async function until(what: string, check: () => boolean, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await sleep(10);
+  }
+}
 const MB = 1024 * 1024;
 const MARK = "…[truncated]";
 const APP = "Visual Studio Code - Insiders";
@@ -1735,6 +1743,132 @@ describe("where a new session opens", () => {
     const sent = await agent.send(null, "new");
     expect(sidebar.received.filter((m) => m.type === "io_message").map((m) => m.channelId)).toEqual(["c-new"]);
     expect(sent.session).toBe(sidebar.channels.get("c-new")!.sessionId!);
+  });
+
+  /** A host message to the webview: the agent looks at its waits again (as when the host answers the boot session list). */
+  const look = (comms: FakeComms) => comms.send({ type: "request", channelId: "", requestId: "", request: { type: "visibility_changed", isVisible: true } });
+
+  test("a start-up chat the agent looks at before the webview closes it (host not held) is kept from being taken by the settle alone", async () => {
+    const { agent, vscode, sidebar } = sidebarWindow({ sidebarSettleMs: 300, channelWaitMs: 3000 });
+    vscode.commands.onCommand = () =>
+      void setTimeout(async () => {
+        sidebar.fromClient({ type: "launch_claude", channelId: "c-startup" });
+        await sidebar.flush();
+        look(sidebar);
+        setTimeout(async () => {
+          sidebar.fromClient({ type: "close_channel", channelId: "c-startup" });
+          sidebar.fromClient({ type: "launch_claude", channelId: "c-new" });
+          await sidebar.flush();
+          sidebar.promoteChannel("c-new");
+        }, 100);
+      }, 30);
+    const sent = await agent.send(null, "new");
+    expect(sidebar.received.filter((m) => m.type === "io_message").map((m) => m.channelId)).toEqual(["c-new"]);
+    expect(sent.session).toBe(sidebar.channels.get("c-new")!.sessionId!);
+  });
+
+  test("a start-up chat the webview closed but the host lists for longer than the settle is kept from being taken by the closing mark alone", async () => {
+    const { agent, vscode, sidebar } = sidebarWindow({ sidebarSettleMs: 200, channelWaitMs: 4000 });
+    vscode.commands.onCommand = () =>
+      void setTimeout(async () => {
+        sidebar.fromClient({ type: "launch_claude", channelId: "c-startup" });
+        await sidebar.flush();
+        const release = sidebar.holdReader();
+        look(sidebar);
+        setTimeout(() => {
+          sidebar.fromClient({ type: "close_channel", channelId: "c-startup" });
+          sidebar.fromClient({ type: "launch_claude", channelId: "c-new" });
+        }, 50);
+        setTimeout(async () => {
+          release();
+          await sidebar.flush();
+          sidebar.promoteChannel("c-new");
+        }, 1200);
+      }, 30);
+    const sent = await agent.send(null, "new");
+    expect(sidebar.received.filter((m) => m.type === "io_message").map((m) => m.channelId)).toEqual(["c-new"]);
+    expect(sent.session).toBe(sidebar.channels.get("c-new")!.sessionId!);
+  });
+
+  // The start-up chat launches while the sidebar's first session list loads; the parked new session follows only
+  // once that list is answered, which takes long in a project with many sessions.
+  test("a booting sidebar's start-up chat is never taken while its session list is still loading, however long that takes", async () => {
+    const { agent, vscode, sidebar } = sidebarWindow({ sidebarSettleMs: 300, channelWaitMs: 4000 });
+    const list = sidebar.listSessions.bind(sidebar);
+    sidebar.listSessions = async (entryPoint?: string) => {
+      await sleep(900);
+      return list(entryPoint);
+    };
+    vscode.commands.onCommand = () =>
+      void setTimeout(async () => {
+        sidebar.fromClient({ type: "request", channelId: "", requestId: "boot-list", request: { type: "list_sessions_request", entryPoint: "panel_boot" } });
+        sidebar.fromClient({ type: "launch_claude", channelId: "c-startup" });
+        await until("the boot list's answer", () => sidebar.sent.some((m) => m.type === "response" && m.requestId === "boot-list"));
+        sidebar.fromClient({ type: "close_channel", channelId: "c-startup" });
+        sidebar.fromClient({ type: "launch_claude", channelId: "c-new" });
+        await sidebar.flush();
+        sidebar.promoteChannel("c-new");
+      }, 30);
+    const sent = await agent.send(null, "new");
+    expect(sidebar.received.filter((m) => m.type === "io_message").map((m) => m.channelId)).toEqual(["c-new"]);
+    expect(sent.session).toBe(sidebar.channels.get("c-new")!.sessionId!);
+  });
+
+  // In the sidebar, the session that becomes active ends every other unused empty chat, and the phone's session
+  // counts as unused until its Claude process has started and replayed the prompt.
+  test("while a phone session is still starting in the sidebar, the next new session opens in a tab, so the first keeps its prompt", async () => {
+    const { agent, vscode, sidebar, provider } = sidebarWindow({ channelWaitMs: 3000 });
+    let sidebarOpens = 0;
+    let tab: FakeComms | undefined;
+    vscode.commands.onCommand = (_id, args) => {
+      if (args[5]?.programmatic === "honor-preferred-location") {
+        const n = ++sidebarOpens;
+        // the first one's Claude is still starting (launching, no name); later ones start at once
+        setTimeout(() => (n === 1 ? sidebar.openChannel("c-first", undefined, { pending: true }) : sidebar.openChannel(`c-side-${n}`)), 30);
+      } else {
+        setTimeout(() => {
+          tab = createFakeComms({ sessions: LISTED });
+          tab.openChannel("c-tab");
+          provider.allComms.add(tab);
+        }, 30);
+      }
+    };
+    const first = agent.send(null, "first");
+    await until("the first prompt", () => sidebar.received.some((m) => m.type === "io_message"));
+    const second = await agent.send(null, "second");
+    expect(vscode.commands.calls).toEqual([editorOpen(undefined, HONOR_LOCATION), editorOpen(undefined, PIN_TO_PANEL)]);
+    expect(tab!.received.filter((m) => m.type === "io_message").map((m) => m.channelId)).toEqual(["c-tab"]);
+    expect(second.session).toBe(tab!.channels.get("c-tab")!.sessionId!);
+    sidebar.promoteChannel("c-first"); // the first session's Claude is up, and names it
+    expect((await first).session).toBe(sidebar.channels.get("c-first")!.sessionId!);
+    await agent.send(null, "third"); // nothing is starting any more: the sidebar again
+    expect(vscode.commands.calls.at(-1)).toEqual(editorOpen(undefined, HONOR_LOCATION));
+  });
+
+  test("while a phone session is still starting in the sidebar, waking or opening another session goes to a tab", async () => {
+    const { agent, vscode, sidebar, provider } = sidebarWindow({ channelWaitMs: 3000 });
+    let firstOpened = false;
+    vscode.commands.onCommand = (_id, args) => {
+      const [session, , , , , options] = args;
+      if (session === undefined && options?.programmatic === "honor-preferred-location" && !firstOpened) {
+        firstOpened = true;
+        setTimeout(() => sidebar.openChannel("c-first", undefined, { pending: true }), 30);
+      }
+      if (session === "s3")
+        setTimeout(() => {
+          const opened = createFakeComms({ sessions: LISTED });
+          opened.openChannel("c3", "s3", { pending: true });
+          provider.allComms.add(opened);
+        }, 30);
+    };
+    const first = agent.send(null, "first");
+    await until("the first prompt", () => sidebar.received.some((m) => m.type === "io_message"));
+    await agent.send("s3", "hi");
+    await agent.open("s2");
+    await agent.openClaude();
+    expect(vscode.commands.calls.slice(1)).toEqual([editorOpen("s3", PIN_TO_PANEL), editorOpen("s2", PIN_TO_PANEL), editorOpen(undefined, PIN_TO_PANEL)]);
+    sidebar.promoteChannel("c-first");
+    await first;
   });
 
   test("a sidebar that hasn't started comes up through editor.open, and its start-up chat is never taken", async () => {
